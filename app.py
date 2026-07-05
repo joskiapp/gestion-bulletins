@@ -91,13 +91,14 @@ def split_nom_prenom(nom_complet):
 
 def tableau_selectionnable(df, height=460):
     """Affiche un tableau HTML où l'on peut cliquer-glisser pour sélectionner une plage
-    de cellules (comme Excel), puis Ctrl+C pour la copier vers le presse-papiers."""
+    de cellules (comme Excel), avec défilement automatique en bordure, copie via Ctrl+C
+    ou clic droit → Copier."""
     cols = list(df.columns)
     header_html = "".join(f"<th>{html_lib.escape(str(c))}</th>" for c in cols)
     body_html = ""
     for r, (_, row) in enumerate(df.iterrows()):
         cells = "".join(
-            f'<td data-r="{r}" data-c="{c}">{html_lib.escape(str(row[col]))}</td>'
+            f'<td data-r="{r}" data-c="{c}">{html_lib.escape("" if pd.isna(row[col]) else str(row[col]))}</td>'
             for c, col in enumerate(cols)
         )
         body_html += f"<tr>{cells}</tr>"
@@ -105,26 +106,37 @@ def tableau_selectionnable(df, height=460):
     page = f"""
     <style>
       .sel-table-wrap {{ font-family: -apple-system, Segoe UI, Arial, sans-serif; overflow: auto;
-                          max-height: {height}px; border: 1px solid #444; border-radius: 6px; }}
+                          max-height: {height}px; border: 1px solid #444; border-radius: 6px; position: relative; }}
       table.sel-table {{ border-collapse: collapse; width: 100%; font-size: 14px; user-select: none; }}
       table.sel-table th {{ position: sticky; top: 0; background:#2E74B5; color: white;
-                             padding: 6px 10px; text-align: left; white-space: nowrap; }}
+                             padding: 6px 10px; text-align: left; white-space: nowrap; z-index: 2; }}
       table.sel-table td {{ padding: 5px 10px; border: 1px solid #3a3a3a; white-space: nowrap; color: #eee; }}
       table.sel-table td.selected {{ background: #2E74B5; color: white; }}
       .copy-msg {{ font-size: 12px; color: #70AD47; margin-top: 4px; height: 16px; }}
+      .ctx-menu {{ position: fixed; display: none; background: #2b2b2b; border: 1px solid #555;
+                   border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 9999;
+                   font-family: -apple-system, Segoe UI, Arial, sans-serif; font-size: 14px; overflow: hidden; }}
+      .ctx-menu div {{ padding: 8px 16px; color: #eee; cursor: pointer; white-space: nowrap; }}
+      .ctx-menu div:hover {{ background: #2E74B5; }}
     </style>
-    <div class="sel-table-wrap">
+    <div class="sel-table-wrap" id="wrap">
       <table class="sel-table" id="selTable">
         <thead><tr>{header_html}</tr></thead>
         <tbody>{body_html}</tbody>
       </table>
     </div>
     <div class="copy-msg" id="copyMsg"></div>
+    <div class="ctx-menu" id="ctxMenu">
+      <div id="ctxCopy">📋 Copier</div>
+    </div>
     <script>
+      const wrap = document.getElementById("wrap");
       const table = document.getElementById("selTable");
       const msg = document.getElementById("copyMsg");
+      const ctxMenu = document.getElementById("ctxMenu");
       let isSelecting = false;
       let startCell = null;
+      let autoScrollTimer = null;
 
       function clearSelection() {{
         table.querySelectorAll("td.selected").forEach(td => td.classList.remove("selected"));
@@ -140,7 +152,24 @@ def tableau_selectionnable(df, height=460):
         }});
       }}
 
+      function stopAutoScroll() {{
+        if (autoScrollTimer) {{ clearInterval(autoScrollTimer); autoScrollTimer = null; }}
+      }}
+
+      // Défilement automatique quand le curseur approche le haut/bas pendant la sélection
+      function handleAutoScroll(clientY) {{
+        stopAutoScroll();
+        const rect = wrap.getBoundingClientRect();
+        const margin = 30;
+        if (clientY > rect.bottom - margin) {{
+          autoScrollTimer = setInterval(() => {{ wrap.scrollTop += 15; }}, 30);
+        }} else if (clientY < rect.top + margin) {{
+          autoScrollTimer = setInterval(() => {{ wrap.scrollTop -= 15; }}, 30);
+        }}
+      }}
+
       table.addEventListener("mousedown", (e) => {{
+        if (e.button !== 0) return;  // seulement le clic gauche démarre une sélection
         const td = e.target.closest("td");
         if (!td) return;
         isSelecting = true;
@@ -149,14 +178,15 @@ def tableau_selectionnable(df, height=460):
         e.preventDefault();
       }});
 
-      table.addEventListener("mouseover", (e) => {{
+      document.addEventListener("mousemove", (e) => {{
         if (!isSelecting) return;
-        const td = e.target.closest("td");
-        if (!td) return;
-        selectRange(+startCell.dataset.r, +startCell.dataset.c, +td.dataset.r, +td.dataset.c);
+        handleAutoScroll(e.clientY);
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        const td = el ? el.closest("td") : null;
+        if (td) selectRange(+startCell.dataset.r, +startCell.dataset.c, +td.dataset.r, +td.dataset.c);
       }});
 
-      document.addEventListener("mouseup", () => {{ isSelecting = false; }});
+      document.addEventListener("mouseup", () => {{ isSelecting = false; stopAutoScroll(); }});
 
       function getSelectedAsTSV() {{
         const selected = Array.from(table.querySelectorAll("td.selected"));
@@ -174,28 +204,76 @@ def tableau_selectionnable(df, height=460):
         }}).join("\\n");
       }}
 
-      document.addEventListener("keydown", async (e) => {{
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {{
-          const text = getSelectedAsTSV();
-          if (!text) return;
-          try {{
-            await navigator.clipboard.writeText(text);
-            msg.innerText = "✅ Copié ! Vous pouvez coller dans Excel (Ctrl+V).";
-          }} catch (err) {{
-            msg.innerText = "⚠️ Copie automatique bloquée par le navigateur — réessayez.";
-          }}
-          setTimeout(() => {{ msg.innerText = ""; }}, 3000);
+      async function copySelection() {{
+        const text = getSelectedAsTSV();
+        if (!text) return;
+        try {{
+          await navigator.clipboard.writeText(text);
+          msg.innerText = "✅ Copié ! Vous pouvez coller dans Excel (Ctrl+V).";
+        }} catch (err) {{
+          msg.innerText = "⚠️ Copie automatique bloquée par le navigateur — réessayez.";
         }}
+        setTimeout(() => {{ msg.innerText = ""; }}, 3000);
+      }}
+
+      document.addEventListener("keydown", (e) => {{
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") copySelection();
+      }});
+
+      // Menu clic droit
+      table.addEventListener("contextmenu", (e) => {{
+        e.preventDefault();
+        const td = e.target.closest("td");
+        if (td && !td.classList.contains("selected")) {{
+          selectRange(+td.dataset.r, +td.dataset.c, +td.dataset.r, +td.dataset.c);
+        }}
+        ctxMenu.style.left = e.clientX + "px";
+        ctxMenu.style.top = e.clientY + "px";
+        ctxMenu.style.display = "block";
+      }});
+
+      document.getElementById("ctxCopy").addEventListener("click", () => {{
+        copySelection();
+        ctxMenu.style.display = "none";
+      }});
+
+      document.addEventListener("click", (e) => {{
+        if (!ctxMenu.contains(e.target)) ctxMenu.style.display = "none";
       }});
     </script>
     """
     components.html(page, height=height + 40, scrolling=True)
 
 
+def construire_resultat_df():
+    ref = st.session_state.reference_df
+    valid_mask = ref["Nom et Prénom"].astype(str).str.strip() != ""
+    valid_ref = ref[valid_mask].copy()
+    matieres = st.session_state.matieres
+    rows = []
+    for idx in valid_ref.index:
+        notes_etu = st.session_state.grades.get(str(idx), {})
+        nom, prenom = split_nom_prenom(valid_ref.loc[idx, "Nom et Prénom"])
+        row = {"Ordre": len(rows) + 1, "Nom": nom, "Prénom": prenom,
+               "Matricule": valid_ref.loc[idx, "Matricule"]}
+        notes_numeriques = []
+        for mat in matieres:
+            val = notes_etu.get(mat, None)
+            row[mat] = val
+            if val is not None:
+                notes_numeriques.append(val)
+        row["Moyenne"] = round(sum(notes_numeriques) / len(notes_numeriques), 2) if notes_numeriques else None
+        rows.append(row)
+    return pd.DataFrame(rows), matieres, valid_ref
+
+
 st.title("🧮 Calculatrice de Bulletins")
 st.caption("Liste de référence → saisie désordonnée des notes → résultat toujours dans l'ordre officiel")
 
-tab1, tab2, tab3 = st.tabs(["📋 1. Liste de référence", "✍️ 2. Saisie des notes", "📊 3. Résultat final"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📋 1. Liste de référence", "✍️ 2. Saisie des notes",
+    "📊 3. Résultat final", "📑 4. Récapitulatif",
+])
 
 # ============================================================
 # ONGLET 1 : LISTE DE RÉFÉRENCE
@@ -237,6 +315,13 @@ with tab1:
         persist_all()
         st.rerun()
 
+    st.divider()
+    st.write("**📚 Matières actuellement enregistrées :**")
+    if st.session_state.matieres:
+        st.write(", ".join(st.session_state.matieres))
+    else:
+        st.caption("Aucune matière saisie pour l'instant (à faire dans l'onglet '✍️ 2. Saisie des notes').")
+
 # ============================================================
 # ONGLET 2 : SAISIE DES NOTES (recherche par nom, ordre libre)
 # ============================================================
@@ -256,45 +341,79 @@ with tab2:
             for idx in valid_indices
         }
 
-        matiere_defaut = st.session_state.matieres[-1] if st.session_state.matieres else ""
-        col0, col1, col2 = st.columns([2, 3, 1])
-        with col0:
-            matiere = st.text_input(
-                "📚 Matière", value=matiere_defaut, placeholder="Ex: Mathématiques", key="matiere_input"
-            )
-        with col1:
-            chosen_idx = st.selectbox(
-                "🔍 Tapez 2-3 lettres du nom ou prénom pour le retrouver",
-                options=list(options.keys()),
-                format_func=lambda i: options[i],
-                index=None,
-                placeholder="Rechercher un étudiant...",
-                key="search_student",
-            )
-        with col2:
-            note_val = st.number_input("Note /20", min_value=0.0, max_value=20.0, step=0.25, key="note_input")
+        # --- Choix de la matière : reste fixe tant qu'on ne la change pas volontairement ---
+        NOUVELLE = "➕ Nouvelle matière..."
+        if "matiere_courante" not in st.session_state:
+            st.session_state.matiere_courante = st.session_state.matieres[-1] if st.session_state.matieres else ""
 
-        if st.button("✅ Enregistrer cette note", type="primary", disabled=(chosen_idx is None or not matiere.strip())):
-            idx_str = str(chosen_idx)
-            if idx_str not in st.session_state.grades:
-                st.session_state.grades[idx_str] = {}
-            st.session_state.grades[idx_str][matiere.strip()] = note_val
-            if matiere.strip() not in st.session_state.matieres:
-                st.session_state.matieres.append(matiere.strip())
-            persist_all()
-            st.success(f"Note enregistrée pour {options[chosen_idx]} en {matiere.strip()}.")
-            st.rerun()
+        choix_matiere = st.selectbox(
+            "📚 Matière (tapez pour rechercher parmi les matières existantes, ou choisissez 'Nouvelle matière')",
+            options=st.session_state.matieres + [NOUVELLE],
+            index=(st.session_state.matieres.index(st.session_state.matiere_courante)
+                   if st.session_state.matiere_courante in st.session_state.matieres else
+                   (len(st.session_state.matieres) if st.session_state.matieres else 0)),
+            key="matiere_select",
+        )
+        if choix_matiere == NOUVELLE:
+            nouvelle_matiere = st.text_input("Nom de la nouvelle matière", key="nouvelle_matiere_input")
+            matiere_active = nouvelle_matiere.strip()
+        else:
+            matiere_active = choix_matiere
+            st.session_state.matiere_courante = choix_matiere
+
+        st.caption(f"Matière active : **{matiere_active or '(aucune)'}** — elle restera sélectionnée pour les saisies suivantes.")
+
+        # --- Formulaire : Entrée du clavier valide directement, puis se vide pour la saisie suivante ---
+        with st.form("form_saisie_note", clear_on_submit=True):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                chosen_idx = st.selectbox(
+                    "🔍 Tapez 2-3 lettres du nom ou prénom pour le retrouver",
+                    options=list(options.keys()),
+                    format_func=lambda i: options[i],
+                    index=None,
+                    placeholder="Rechercher un étudiant...",
+                    key="search_student",
+                )
+            with col2:
+                note_val = st.number_input("Note /20", min_value=0.0, max_value=20.0, step=0.25, key="note_input")
+
+            submitted = st.form_submit_button("✅ Enregistrer (ou appuyez sur Entrée)", type="primary")
+            if submitted:
+                if chosen_idx is None or not matiere_active:
+                    st.warning("Choisissez une matière et un étudiant avant de valider.")
+                else:
+                    idx_str = str(chosen_idx)
+                    if idx_str not in st.session_state.grades:
+                        st.session_state.grades[idx_str] = {}
+                    st.session_state.grades[idx_str][matiere_active] = note_val
+                    if matiere_active not in st.session_state.matieres:
+                        st.session_state.matieres.append(matiere_active)
+                        st.session_state.matiere_courante = matiere_active
+                    persist_all()
+                    st.success(f"Note enregistrée pour {options[chosen_idx]} en {matiere_active}.")
 
         st.divider()
-        st.write("**Notes saisies jusqu'à présent (ordre de saisie) :**")
+        st.write("**Notes saisies jusqu'à présent :**")
         lignes_saisie = []
         for idx_str, matieres_notes in st.session_state.grades.items():
             idx = int(idx_str)
             if idx in options:
                 for mat, note in matieres_notes.items():
-                    lignes_saisie.append({"Étudiant": options[idx], "Matière": mat, "Note": note})
+                    lignes_saisie.append((idx_str, mat, options[idx], note))
+
         if lignes_saisie:
-            st.dataframe(pd.DataFrame(lignes_saisie), use_container_width=True, hide_index=True)
+            for idx_str, mat, nom_complet, note in lignes_saisie:
+                c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
+                c1.write(nom_complet)
+                c2.write(mat)
+                c3.write(note)
+                if c4.button("🗑️", key=f"del_note_{idx_str}_{mat}"):
+                    del st.session_state.grades[idx_str][mat]
+                    if not st.session_state.grades[idx_str]:
+                        del st.session_state.grades[idx_str]
+                    persist_all()
+                    st.rerun()
         else:
             st.caption("Aucune note saisie pour l'instant.")
 
@@ -304,32 +423,14 @@ with tab2:
 with tab3:
     st.subheader("Résultat final — dans l'ordre officiel de la liste")
 
-    ref = st.session_state.reference_df
-    valid_mask = ref["Nom et Prénom"].astype(str).str.strip() != ""
-    valid_ref = ref[valid_mask].copy()
+    resultat_df, matieres, valid_ref = construire_resultat_df()
 
     if valid_ref.empty:
         st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
     else:
-        matieres = st.session_state.matieres  # ordre d'apparition des matières
-
         col1, col2, col3 = st.columns([1, 1, 3])
         with col1:
-            rows_preview = []
-            for idx in valid_ref.index:
-                notes_etu = st.session_state.grades.get(str(idx), {})
-                nom, prenom = split_nom_prenom(valid_ref.loc[idx, "Nom et Prénom"])
-                row = {"Ordre": len(rows_preview) + 1, "Nom": nom, "Prénom": prenom,
-                       "Matricule": valid_ref.loc[idx, "Matricule"]}
-                notes_numeriques = []
-                for mat in matieres:
-                    val = notes_etu.get(mat, "")
-                    row[mat] = val
-                    if val != "":
-                        notes_numeriques.append(val)
-                row["Moyenne"] = round(sum(notes_numeriques) / len(notes_numeriques), 2) if notes_numeriques else ""
-                rows_preview.append(row)
-            csv = pd.DataFrame(rows_preview).to_csv(index=False).encode("utf-8")
+            csv = resultat_df.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ CSV", csv, "resultat_final.csv", "text/csv")
         with col2:
             if st.button("🗑️ Effacer les notes", type="secondary"):
@@ -339,10 +440,38 @@ with tab3:
                 st.success("Notes effacées. La liste de référence est conservée.")
                 st.rerun()
 
-        resultat_df = pd.DataFrame(rows_preview)
         nb_notes = sum(1 for idx in valid_ref.index if st.session_state.grades.get(str(idx)))
-        st.caption(f"📝 {nb_notes} étudiant(s) avec au moins une note, sur {len(rows_preview)} au total "
+        st.caption(f"📝 {nb_notes} étudiant(s) avec au moins une note, sur {len(resultat_df)} au total "
                    f"— {len(matieres)} matière(s) : {', '.join(matieres) if matieres else 'aucune'}.")
 
-        st.caption("💡 Cliquez-glissez pour sélectionner une plage de cellules, puis Ctrl+C pour copier vers Excel.")
+        st.caption("💡 Cliquez-glissez (ou clic droit → Copier) pour copier une plage de cellules vers Excel.")
         tableau_selectionnable(resultat_df, height=460)
+
+# ============================================================
+# ONGLET 4 : RÉCAPITULATIF (étudiants en lignes, matières en colonnes)
+# ============================================================
+with tab4:
+    st.subheader("Récapitulatif — étudiants en lignes, matières en colonnes")
+
+    resultat_df, matieres, valid_ref = construire_resultat_df()
+
+    if valid_ref.empty:
+        st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
+    elif not matieres:
+        st.info("Aucune matière saisie pour l'instant. Ajoutez des notes dans l'onglet '✍️ 2. Saisie des notes'.")
+    else:
+        st.dataframe(resultat_df, use_container_width=True, hide_index=True, height=460)
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            csv = resultat_df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Télécharger en CSV", csv, "recapitulatif.csv", "text/csv", key="dl_recap_csv")
+        with col2:
+            from io import BytesIO
+            buffer = BytesIO()
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                resultat_df.to_excel(writer, index=False, sheet_name="Récapitulatif")
+            st.download_button(
+                "⬇️ Télécharger en Excel", buffer.getvalue(), "recapitulatif.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_recap_xlsx",
+            )
