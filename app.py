@@ -417,57 +417,65 @@ def afficher_entete_contexte(annee_academique, annee, filiere):
 
 
 # ============================================================
-# BARRE LATÉRALE : MENU ACCORDÉON (Année académique → Année → Filière)
+# NAVIGATION : Année académique + Année + Filière (menus déroulants)
 # ============================================================
-st.sidebar.title("🎓 Navigation")
+st.title("🧮 Calculatrice de Bulletins")
 
-# ---------- ANNÉE ACADÉMIQUE : une seule valeur en cours, on renseigne juste l'année ----------
 if "selected_annee" not in st.session_state:
-    st.session_state.selected_annee = None
+    st.session_state.selected_annee = load_state("selected_annee", None)
 if "selected_filiere" not in st.session_state:
-    st.session_state.selected_filiere = None
+    st.session_state.selected_filiere = load_state("selected_filiere", None)
 if "annee_academique_debut" not in st.session_state:
     st.session_state.annee_academique_debut = load_state("annee_academique_debut", 2025)
 
-debut = st.sidebar.number_input(
-    "📅 Année académique (année de début)",
-    min_value=2000, max_value=2100, step=1,
-    key="annee_academique_debut",
-)
-save_state("annee_academique_debut", int(debut))
+col_aa, col_annee, col_filiere = st.columns([1, 1, 1])
+
+with col_aa:
+    debut = st.number_input(
+        "📅 Année académique (début)",
+        min_value=2000, max_value=2100, step=1,
+        key="annee_academique_debut",
+    )
+    save_state("annee_academique_debut", int(debut))
 ANNEE_ACADEMIQUE = f"{int(debut)}-{int(debut) + 1}"
-st.sidebar.caption(f"➡️ Année académique en cours : **{ANNEE_ACADEMIQUE}**")
 
-st.sidebar.divider()
-
-for annee in CONTEXT_TREE:
-    annee_ouverte = (st.session_state.selected_annee == annee)
-    if st.sidebar.button(
-        ("📂 " if annee_ouverte else "📁 ") + annee,
-        key=f"toggle_annee_{annee}", use_container_width=True,
-    ):
-        if annee_ouverte:
-            st.session_state.selected_annee = None
-            st.session_state.selected_filiere = None
-        else:
-            st.session_state.selected_annee = annee
-            st.session_state.selected_filiere = None
+with col_annee:
+    liste_annees = list(CONTEXT_TREE.keys())
+    index_annee = liste_annees.index(st.session_state.selected_annee) if st.session_state.selected_annee in liste_annees else None
+    annee_choisie = st.selectbox(
+        "🗓️ Année", options=liste_annees, index=index_annee,
+        placeholder="Choisir une année...", key="select_annee",
+    )
+    if annee_choisie != st.session_state.selected_annee:
+        st.session_state.selected_annee = annee_choisie
+        st.session_state.selected_filiere = None
+        save_state("selected_annee", annee_choisie)
+        save_state("selected_filiere", None)
         st.rerun()
 
-    if annee_ouverte:
-        for filiere in CONTEXT_TREE[annee]:
-            est_actif = (st.session_state.selected_filiere == filiere)
-            if st.sidebar.button(
-                ("　　✅ " if est_actif else "　　　") + filiere,
-                key=f"nav_{annee}_{filiere}", use_container_width=True,
-            ):
-                st.session_state.selected_filiere = filiere
-                st.rerun()
-
-st.title("🧮 Calculatrice de Bulletins")
+with col_filiere:
+    if st.session_state.selected_annee:
+        liste_filieres = CONTEXT_TREE[st.session_state.selected_annee]
+        index_filiere = (
+            liste_filieres.index(st.session_state.selected_filiere)
+            if st.session_state.selected_filiere in liste_filieres else None
+        )
+        filiere_choisie = st.selectbox(
+            "🎓 Filière", options=liste_filieres, index=index_filiere,
+            placeholder="Choisir une filière...", key="select_filiere",
+        )
+        if filiere_choisie != st.session_state.selected_filiere:
+            st.session_state.selected_filiere = filiere_choisie
+            save_state("selected_filiere", filiere_choisie)
+            st.rerun()
+    else:
+        st.selectbox(
+            "🎓 Filière", options=[], placeholder="Choisissez d'abord une année",
+            key="select_filiere_disabled", disabled=True,
+        )
 
 if not st.session_state.selected_annee or not st.session_state.selected_filiere:
-    st.info("👈 Dans le menu à gauche : choisissez une année, puis une filière.")
+    st.info("👆 Choisissez une année, puis une filière pour commencer.")
     st.stop()
 
 ANNEE = st.session_state.selected_annee
@@ -930,4 +938,3 @@ with tab5:
                         f"Bulletin — {nom} {prenom}", sous_titre, lignes_html_impression, moyenne_html,
                         cle_widget=f"print_{CLE}_{idx_choisi}",
                     )
-
