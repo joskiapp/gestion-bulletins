@@ -9,6 +9,7 @@ import html as html_lib
 import difflib
 import unicodedata
 import re
+import copy
 from io import BytesIO
 
 st.set_page_config(page_title="Calculatrice de Bulletins", page_icon="🧮", layout="wide")
@@ -72,9 +73,17 @@ init_db()
 
 
 # ---------- GESTION DU CONTEXTE (ANNÉE + FILIÈRE) ----------
-def cle_contexte(annee, filiere):
-    brut = f"{annee}_{filiere}"
+def cle_contexte(annee_academique, annee, filiere):
+    brut = f"{annee_academique}_{annee}_{filiere}"
     return re.sub(r"[^A-Za-z0-9_]", "_", brut)
+
+
+def charger_annees_academiques():
+    return load_state("liste_annees_academiques", [])
+
+
+def sauvegarder_annees_academiques(liste):
+    save_state("liste_annees_academiques", liste)
 
 
 def contexte_par_defaut():
@@ -137,6 +146,27 @@ def trouver_meilleure_correspondance(nom_a_chercher, noms_reference, seuil=0.55)
         if score > meilleur_score:
             meilleur_score, meilleur_idx = score, i
     return (meilleur_idx, meilleur_score) if meilleur_score >= seuil else (None, meilleur_score)
+
+
+def sauvegarder_backup(ctx, label, **donnees):
+    """Garde une copie de secours avant une action destructrice (suppression), pour pouvoir l'annuler."""
+    ctx["backup"] = {"label": label, "donnees": copy.deepcopy(donnees)}
+
+
+def bandeau_annuler(ctx, cle):
+    """Affiche un bandeau permettant d'annuler la dernière suppression, si disponible."""
+    if ctx.get("backup"):
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.warning(f"🕓 Dernière action : **{ctx['backup']['label']}**. Vous pouvez encore l'annuler.")
+        with col2:
+            if st.button("↩️ Annuler", key=f"undo_{cle}", type="primary", use_container_width=True):
+                for k, v in ctx["backup"]["donnees"].items():
+                    ctx[k] = v
+                ctx["backup"] = None
+                persist_contexte(cle, ctx)
+                st.success("Action annulée, les données précédentes ont été restaurées.")
+                st.rerun()
 
 
 def bouton_impression(titre, sous_titre, lignes_html, moyenne_html, cle_widget):
@@ -388,13 +418,59 @@ def construire_resultat_df(ctx):
     return pd.DataFrame(rows), matieres, valid_ref
 
 
-def afficher_entete_contexte(annee, filiere):
-    st.info(f"🗓️ **Année :** {annee} &nbsp;|&nbsp; 🎓 **Filière :** {filiere}")
+def afficher_entete_contexte(annee_academique, annee, filiere):
+    st.info(f"📅 **Année académique :** {annee_academique} &nbsp;|&nbsp; "
+            f"🗓️ **Année :** {annee} &nbsp;|&nbsp; 🎓 **Filière :** {filiere}")
 
+
+# ============================================================
+# NIVEAU 0 : CHOIX / CRÉATION DE L'ANNÉE ACADÉMIQUE
+# ============================================================
+if "annee_academique" not in st.session_state:
+    st.session_state.annee_academique = None
+
+if st.session_state.annee_academique is None:
+    st.title("🧮 Calculatrice de Bulletins")
+    st.subheader("📅 Choisissez ou créez une année académique")
+
+    liste_annees_academiques = charger_annees_academiques()
+
+    if liste_annees_academiques:
+        st.write("Années académiques déjà créées :")
+        for aa in liste_annees_academiques:
+            if st.button(f"📅 {aa}", key=f"select_aa_{aa}", use_container_width=True):
+                st.session_state.annee_academique = aa
+                st.rerun()
+    else:
+        st.info("Aucune année académique créée pour l'instant. Créez-en une ci-dessous avec le bouton ➕.")
+
+    with st.expander("➕ Créer une nouvelle année académique", expanded=True):
+        debut = st.number_input("Année de début", min_value=2000, max_value=2100, value=2025, step=1, key="aa_debut")
+        fin = int(debut) + 1
+        st.caption(f"➡️ Année académique correspondante : **{int(debut)}-{fin}**")
+        if st.button("✅ Valider cette année académique", type="primary", key="valider_aa"):
+            nouvelle_aa = f"{int(debut)}-{fin}"
+            if nouvelle_aa not in liste_annees_academiques:
+                liste_annees_academiques.append(nouvelle_aa)
+                sauvegarder_annees_academiques(liste_annees_academiques)
+            st.session_state.annee_academique = nouvelle_aa
+            st.rerun()
+
+    st.stop()
+
+ANNEE_ACADEMIQUE = st.session_state.annee_academique
 
 # ============================================================
 # BARRE LATÉRALE : NAVIGATION ANNÉE → FILIÈRE
 # ============================================================
+st.sidebar.success(f"📅 Année académique : **{ANNEE_ACADEMIQUE}**")
+if st.sidebar.button("🔁 Changer d'année académique", use_container_width=True):
+    st.session_state.annee_academique = None
+    st.session_state.selected_annee = None
+    st.session_state.selected_filiere = None
+    st.rerun()
+st.sidebar.divider()
+
 st.sidebar.title("🎓 Navigation")
 st.sidebar.caption("Choisissez une année, puis une filière.")
 
@@ -421,11 +497,13 @@ if not st.session_state.selected_annee or not st.session_state.selected_filiere:
 
 ANNEE = st.session_state.selected_annee
 FILIERE = st.session_state.selected_filiere
-CLE = cle_contexte(ANNEE, FILIERE)
+CLE = cle_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
 ctx = charger_contexte(CLE)
 
 st.caption(f"📂 Espace de travail : **{ANNEE} — {FILIERE}** "
            f"(les données sont indépendantes pour chaque filière)")
+
+bandeau_annuler(ctx, CLE)
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📋 1. Liste de référence", "✍️ 2. Saisie des notes",
@@ -440,9 +518,11 @@ with tab1:
 
     nb_notes_existantes = sum(len(v) for v in ctx["grades"].values())
     if st.button("🗑️ Effacer la liste de référence (garde les résultats)", type="secondary", key=f"clear_ref_{CLE}"):
+        sauvegarder_backup(ctx, "liste de référence effacée", reference_df=ctx["reference_df"])
         ctx["reference_df"] = pd.DataFrame({"Nom et Prénom": [""] * MAX_ROWS, "Matricule": [""] * MAX_ROWS})
         persist_contexte(CLE, ctx)
-        st.success("Liste de référence effacée. Les notes déjà saisies sont conservées.")
+        st.success("Liste de référence effacée. Les notes déjà saisies sont conservées. "
+                    "Vous pouvez l'annuler juste au-dessus si c'est une erreur.")
         st.rerun()
     if nb_notes_existantes > 0:
         st.caption(
@@ -490,13 +570,15 @@ with tab1:
 
     nb_notes_liees = sum(len(v) for v in ctx["grades"].values())
     if st.button("🗑️ Effacer la liste des matières", type="secondary", key=f"clear_mat_{CLE}"):
+        sauvegarder_backup(ctx, "liste des matières et notes effacées",
+                            matieres_df=ctx["matieres_df"], matieres=ctx["matieres"], grades=ctx["grades"])
         ctx["matieres_df"] = pd.DataFrame({"Matière": [""] * 50})
         ctx["matieres"] = []
         ctx["matiere_courante"] = ""
         ctx["grades"] = {}  # les notes étaient liées aux anciennes matières, elles n'ont plus de sens
         persist_contexte(CLE, ctx)
         st.success("Liste des matières (et notes associées) effacée. La liste des étudiants est conservée. "
-                   "Vous pouvez coller les nouvelles matières.")
+                   "Vous pouvez l'annuler juste en haut de page si c'est une erreur.")
         st.rerun()
     if nb_notes_liees > 0:
         st.caption(f"⚠️ {nb_notes_liees} note(s) actuellement liée(s) aux matières existantes — "
@@ -529,7 +611,7 @@ with tab1:
 # ============================================================
 with tab2:
     st.subheader("Saisie des notes (dans n'importe quel ordre)")
-    afficher_entete_contexte(ANNEE, FILIERE)
+    afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
 
     ref = ctx["reference_df"]
     valid_mask = ref["Nom et Prénom"].astype(str).str.strip() != ""
@@ -637,6 +719,16 @@ with tab2:
                 ctx["collage_notes_df"] = edited_collage
                 st.rerun()
 
+            col_a, col_b = st.columns([1, 3])
+            with col_a:
+                if st.button("🗑️ Vider le tableau collé", type="secondary", key=f"clear_collage_{CLE}"):
+                    sauvegarder_backup(ctx, "tableau collé vidé", collage_notes_df=ctx["collage_notes_df"])
+                    ctx["collage_notes_df"] = pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500})
+                    ctx["analyse_collage"] = None
+                    persist_contexte(CLE, ctx)
+                    st.success("Tableau collé vidé. Vous pouvez l'annuler en haut de page si c'est une erreur.")
+                    st.rerun()
+
             if st.button("🔎 Analyser et associer les noms", type="primary", disabled=not matiere_active,
                          key=f"analyser_{CLE}"):
                 noms_ref_valides = [options[idx].split(" — ")[0] for idx in valid_indices]
@@ -654,95 +746,3 @@ with tab2:
                     idx_ref = valid_indices[pos] if pos is not None else None
                     resultats_analyse.append({
                         "Nom collé": nom_saisi,
-                        "Correspondance trouvée": options[idx_ref].split(" — ")[0] if idx_ref is not None else "❌ Aucune",
-                        "Confiance": f"{score*100:.0f}%",
-                        "Note": note_val if note_val is not None else "⚠️ invalide",
-                        "_idx_ref": idx_ref,
-                        "_note_val": note_val,
-                    })
-                ctx["analyse_collage"] = resultats_analyse
-
-            if ctx.get("analyse_collage"):
-                analyse = ctx["analyse_collage"]
-                apercu = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in analyse])
-                st.write("**Aperçu de l'association (vérifiez avant de valider) :**")
-                st.dataframe(apercu, use_container_width=True, hide_index=True)
-
-                nb_ok = sum(1 for r in analyse if r["_idx_ref"] is not None and r["_note_val"] is not None)
-                nb_pb = len(analyse) - nb_ok
-                st.caption(f"✅ {nb_ok} ligne(s) prête(s) à être enregistrée(s) — ⚠️ {nb_pb} problème(s) à corriger si non nul.")
-
-                if st.button("✅ Valider et enregistrer ces notes", type="primary", key=f"valider_collage_{CLE}"):
-                    for r in analyse:
-                        if r["_idx_ref"] is not None and r["_note_val"] is not None:
-                            idx_str = str(r["_idx_ref"])
-                            if idx_str not in ctx["grades"]:
-                                ctx["grades"][idx_str] = {}
-                            ctx["grades"][idx_str][matiere_active] = r["_note_val"]
-                    enregistrer_matiere_si_nouvelle(matiere_active)
-                    ctx["analyse_collage"] = None
-                    ctx["collage_notes_df"] = pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500})
-                    persist_contexte(CLE, ctx)
-                    st.success(f"{nb_ok} note(s) enregistrée(s) en {matiere_active}. Récapitulatif mis à jour.")
-                    st.rerun()
-
-# ============================================================
-# ONGLET 3 : RÉCAPITULATIF
-# ============================================================
-with tab3:
-    st.subheader("Récapitulatif — étudiants en lignes, matières en colonnes")
-    afficher_entete_contexte(ANNEE, FILIERE)
-
-    resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
-
-    if valid_ref.empty:
-        st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
-    else:
-        col1, col2, col3 = st.columns([1, 1, 3])
-        with col1:
-            csv_dl = resultat_df.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ CSV", csv_dl, f"recapitulatif_{ANNEE}_{FILIERE}.csv", "text/csv",
-                                key=f"dl_recap_csv_top_{CLE}")
-        with col2:
-            if st.button("🗑️ Effacer les notes", type="secondary", key=f"clear_notes_{CLE}"):
-                ctx["grades"] = {}
-                persist_contexte(CLE, ctx)
-                st.success("Notes effacées. La liste de référence et les matières sont conservées.")
-                st.rerun()
-
-        nb_notes = sum(1 for idx in valid_ref.index if ctx["grades"].get(str(idx)))
-        st.caption(f"📝 {nb_notes} étudiant(s) avec au moins une note, sur {len(resultat_df)} au total "
-                   f"— {len(matieres)} matière(s) : {', '.join(matieres) if matieres else 'aucune'}.")
-
-        if not matieres:
-            st.info("Aucune matière saisie pour l'instant. Ajoutez des notes dans l'onglet '✍️ 2. Saisie des notes'.")
-        else:
-            st.caption("💡 Cliquez-glissez (ou clic droit → Copier) pour copier une plage de cellules vers Excel. "
-                       "Les colonnes Ordre/Nom/Prénom/Matricule restent figées lors du défilement horizontal.")
-            tableau_selectionnable(resultat_df, height=460, colonnes_figees=4, cle_widget=f"recap_{CLE}")
-
-            entete_texte = f"Année : {ANNEE} | Filière : {FILIERE}"
-
-            colx, coly = st.columns([1, 1])
-            with colx:
-                csv_contenu = entete_texte + "\n" + resultat_df.to_csv(index=False)
-                st.download_button("⬇️ Télécharger en CSV", csv_contenu.encode("utf-8"),
-                                    f"recapitulatif_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_recap_csv_{CLE}")
-            with coly:
-                buffer = BytesIO()
-                with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                    pd.DataFrame({entete_texte: []}).to_excel(writer, index=False, sheet_name="Récapitulatif", startrow=0)
-                    resultat_df.to_excel(writer, index=False, sheet_name="Récapitulatif", startrow=2)
-                st.download_button(
-                    "⬇️ Télécharger en Excel", buffer.getvalue(), f"recapitulatif_{ANNEE}_{FILIERE}.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_recap_xlsx_{CLE}",
-                )
-
-# ============================================================
-# ONGLET 4 : LISTE DES DÉCISIONS
-# ============================================================
-with tab4:
-    st.subheader("Liste des décisions — validation des matières")
-    afficher_entete_contexte(ANNEE, FILIERE)
-
-    resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
