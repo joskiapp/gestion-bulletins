@@ -139,6 +139,46 @@ def trouver_meilleure_correspondance(nom_a_chercher, noms_reference, seuil=0.55)
     return (meilleur_idx, meilleur_score) if meilleur_score >= seuil else (None, meilleur_score)
 
 
+def bouton_impression(titre, sous_titre, lignes_html, moyenne_html, cle_widget):
+    """Bouton qui ouvre la boîte de dialogue d'impression du navigateur (choix d'imprimante)
+    avec uniquement le contenu du bulletin, proprement mis en page."""
+    contenu = f"""
+    <html><head><meta charset="utf-8"><title>{html_lib.escape(titre)}</title>
+    <style>
+      body {{ font-family: Arial, sans-serif; padding: 40px; color: #000; }}
+      h1 {{ font-size: 22px; border-bottom: 2px solid #2E74B5; padding-bottom: 8px; }}
+      .sous {{ color: #444; margin-bottom: 24px; }}
+      table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
+      th, td {{ border: 1px solid #999; padding: 8px 12px; text-align: left; }}
+      th {{ background: #2E74B5; color: white; }}
+      .moyenne {{ margin-top: 20px; font-size: 18px; font-weight: bold; }}
+    </style></head>
+    <body>
+      <h1>🎓 {html_lib.escape(titre)}</h1>
+      <div class="sous">{sous_titre}</div>
+      <table><thead><tr><th>Matière</th><th>Note /20</th></tr></thead>
+      <tbody>{lignes_html}</tbody></table>
+      <div class="moyenne">{moyenne_html}</div>
+      <script>window.onload = function() {{ window.print(); }};</script>
+    </body></html>
+    """
+    contenu_js = json.dumps(contenu)
+    page = f"""
+    <button id="btnPrint_{cle_widget}" style="background:#2E74B5;color:white;border:none;
+      padding:10px 18px;border-radius:6px;cursor:pointer;font-size:14px;">
+      🖨️ Imprimer ce bulletin
+    </button>
+    <script>
+      document.getElementById("btnPrint_{cle_widget}").addEventListener("click", function() {{
+        const w = window.open("", "_blank");
+        w.document.write({contenu_js});
+        w.document.close();
+      }});
+    </script>
+    """
+    components.html(page, height=60)
+
+
 def split_nom_prenom(nom_complet):
     """Sépare 'Nom et Prénom' collé en deux parties : premier mot = Nom, reste = Prénom."""
     parts = str(nom_complet).strip().split(" ", 1)
@@ -148,15 +188,19 @@ def split_nom_prenom(nom_complet):
 
 
 # ---------- TABLEAU HTML SÉLECTIONNABLE (copier-coller façon Excel) ----------
-def tableau_selectionnable(df, height=460, colonnes_figees=0, cle_widget="tbl"):
+def tableau_selectionnable(df, height=460, colonnes_figees=0, cle_widget="tbl", largeur_matieres=90):
     """Affiche un tableau HTML où l'on peut cliquer-glisser pour sélectionner une plage
     de cellules (comme Excel), avec défilement automatique en bordure, copie via Ctrl+C
     ou clic droit → Copier. Les `colonnes_figees` premières colonnes restent visibles
-    lors du défilement horizontal (comme 'Figer les volets' dans Excel)."""
+    lors du défilement horizontal (comme 'Figer les volets' dans Excel). Les colonnes
+    suivantes (matières) sont volontairement étroites, avec retour à la ligne dans l'en-tête,
+    pour éviter un tableau trop large."""
     cols = list(df.columns)
 
     largeurs = [max(len(str(c)), *(len(str(v)) for v in df[c].astype(str))) * 8 + 24 if len(df) else 120
                 for c in cols]
+    # Les colonnes figées gardent leur largeur naturelle ; les autres sont bornées et repliables
+    largeurs = [largeurs[c] if c < colonnes_figees else min(largeurs[c], largeur_matieres) for c in range(len(cols))]
     offsets = [0]
     for w in largeurs[:-1]:
         offsets.append(offsets[-1] + w)
@@ -164,8 +208,9 @@ def tableau_selectionnable(df, height=460, colonnes_figees=0, cle_widget="tbl"):
     def style_figee(c):
         if c < colonnes_figees:
             return (f'position: sticky; left: {offsets[c]}px; z-index: 3; '
-                     f'min-width: {largeurs[c]}px; box-shadow: 2px 0 4px rgba(0,0,0,0.4);')
-        return ""
+                     f'min-width: {largeurs[c]}px; box-shadow: 2px 0 4px rgba(0,0,0,0.4); white-space: nowrap;')
+        return (f'white-space: normal; word-break: break-word; max-width: {largeur_matieres}px; '
+                 f'width: {largeur_matieres}px;')
 
     header_html = "".join(
         f'<th style="{style_figee(c)} {"z-index:4;" if c < colonnes_figees else ""}">{html_lib.escape(str(col))}</th>'
@@ -382,9 +427,9 @@ ctx = charger_contexte(CLE)
 st.caption(f"📂 Espace de travail : **{ANNEE} — {FILIERE}** "
            f"(les données sont indépendantes pour chaque filière)")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📋 1. Liste de référence", "✍️ 2. Saisie des notes",
-    "📑 3. Récapitulatif", "🎓 4. Bulletin",
+    "📑 3. Récapitulatif", "⚖️ 4. Liste des décisions", "🎓 5. Bulletin",
 ])
 
 # ============================================================
@@ -694,55 +739,10 @@ with tab3:
                 )
 
 # ============================================================
-# ONGLET 4 : BULLETIN INDIVIDUEL
+# ONGLET 4 : LISTE DES DÉCISIONS
 # ============================================================
 with tab4:
-    st.subheader("Bulletin individuel de l'étudiant")
+    st.subheader("Liste des décisions — validation des matières")
     afficher_entete_contexte(ANNEE, FILIERE)
 
     resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
-
-    if valid_ref.empty:
-        st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
-    else:
-        options_bulletin = {
-            idx: f"{valid_ref.loc[idx, 'Nom et Prénom']}"
-            + (f" — {valid_ref.loc[idx, 'Matricule']}" if str(valid_ref.loc[idx, "Matricule"]).strip() else "")
-            for idx in valid_ref.index
-        }
-
-        idx_choisi = st.selectbox(
-            "🔍 Tapez 2-3 lettres du nom ou prénom de l'étudiant",
-            options=list(options_bulletin.keys()), format_func=lambda i: options_bulletin[i],
-            index=None, placeholder="Rechercher un étudiant...", key=f"search_bulletin_{CLE}",
-        )
-
-        if idx_choisi is not None:
-            nom, prenom = split_nom_prenom(valid_ref.loc[idx_choisi, "Nom et Prénom"])
-            matricule = valid_ref.loc[idx_choisi, "Matricule"]
-            notes_etu = ctx["grades"].get(str(idx_choisi), {})
-
-            st.divider()
-            st.markdown(f"## 🎓 Bulletin — {nom} {prenom}")
-            infos = [f"**Année :** {ANNEE}", f"**Filière :** {FILIERE}"]
-            if matricule and str(matricule).strip():
-                infos.insert(0, f"**Matricule :** {matricule}")
-            st.markdown(" &nbsp;|&nbsp; ".join(infos))
-
-            if not matieres:
-                st.info("Aucune matière/note saisie pour l'instant.")
-            else:
-                lignes_bulletin = [{"Matière": mat, "Note /20": notes_etu.get(mat, "—")} for mat in matieres]
-                notes_num = [v for v in notes_etu.values() if isinstance(v, (int, float))]
-                bulletin_df = pd.DataFrame(lignes_bulletin)
-                st.dataframe(bulletin_df, use_container_width=True, hide_index=True)
-
-                moyenne = round(sum(notes_num) / len(notes_num), 2) if notes_num else None
-                if moyenne is not None:
-                    st.markdown(f"### 📊 Moyenne générale : **{moyenne} / 20**")
-                else:
-                    st.caption("Aucune note enregistrée pour cet étudiant.")
-
-                csv_bulletin = bulletin_df.to_csv(index=False).encode("utf-8")
-                st.download_button("⬇️ Télécharger ce bulletin (CSV)", csv_bulletin,
-                                    f"bulletin_{nom}_{prenom}.csv", "text/csv", key=f"dl_bulletin_{CLE}_{idx_choisi}")
