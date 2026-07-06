@@ -417,7 +417,7 @@ def afficher_entete_contexte(annee_academique, annee, filiere):
 
 
 # ============================================================
-# NAVIGATION : Année académique + Année + Filière (menus déroulants)
+# NAVIGATION : Année académique + Année + Filière (dans l'onglet 1)
 # ============================================================
 st.title("🧮 Calculatrice de Bulletins")
 
@@ -428,66 +428,6 @@ if "selected_filiere" not in st.session_state:
 if "annee_academique_debut" not in st.session_state:
     st.session_state.annee_academique_debut = load_state("annee_academique_debut", 2025)
 
-col_aa, col_annee, col_filiere = st.columns([1, 1, 1])
-
-with col_aa:
-    debut = st.number_input(
-        "📅 Année académique (début)",
-        min_value=2000, max_value=2100, step=1,
-        key="annee_academique_debut",
-    )
-    save_state("annee_academique_debut", int(debut))
-ANNEE_ACADEMIQUE = f"{int(debut)}-{int(debut) + 1}"
-
-with col_annee:
-    liste_annees = list(CONTEXT_TREE.keys())
-    index_annee = liste_annees.index(st.session_state.selected_annee) if st.session_state.selected_annee in liste_annees else None
-    annee_choisie = st.selectbox(
-        "🗓️ Année", options=liste_annees, index=index_annee,
-        placeholder="Choisir une année...", key="select_annee",
-    )
-    if annee_choisie != st.session_state.selected_annee:
-        st.session_state.selected_annee = annee_choisie
-        st.session_state.selected_filiere = None
-        save_state("selected_annee", annee_choisie)
-        save_state("selected_filiere", None)
-        st.rerun()
-
-with col_filiere:
-    if st.session_state.selected_annee:
-        liste_filieres = CONTEXT_TREE[st.session_state.selected_annee]
-        index_filiere = (
-            liste_filieres.index(st.session_state.selected_filiere)
-            if st.session_state.selected_filiere in liste_filieres else None
-        )
-        filiere_choisie = st.selectbox(
-            "🎓 Filière", options=liste_filieres, index=index_filiere,
-            placeholder="Choisir une filière...", key="select_filiere",
-        )
-        if filiere_choisie != st.session_state.selected_filiere:
-            st.session_state.selected_filiere = filiere_choisie
-            save_state("selected_filiere", filiere_choisie)
-            st.rerun()
-    else:
-        st.selectbox(
-            "🎓 Filière", options=[], placeholder="Choisissez d'abord une année",
-            key="select_filiere_disabled", disabled=True,
-        )
-
-if not st.session_state.selected_annee or not st.session_state.selected_filiere:
-    st.info("👆 Choisissez une année, puis une filière pour commencer.")
-    st.stop()
-
-ANNEE = st.session_state.selected_annee
-FILIERE = st.session_state.selected_filiere
-CLE = cle_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
-ctx = charger_contexte(CLE)
-
-st.caption(f"📂 Espace de travail : **{ANNEE} — {FILIERE}** "
-           f"(les données sont indépendantes pour chaque filière)")
-
-bandeau_annuler(ctx, CLE)
-
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📋 1. Liste de référence", "✍️ 2. Saisie des notes",
     "📑 3. Récapitulatif", "⚖️ 4. Liste des décisions", "🎓 5. Bulletin",
@@ -497,6 +437,66 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # ONGLET 1 : LISTE DE RÉFÉRENCE
 # ============================================================
 with tab1:
+    col_aa, col_annee, col_filiere = st.columns([1, 1, 1])
+
+    with col_aa:
+        debut = st.number_input(
+            "📅 Année académique (début)",
+            min_value=2000, max_value=2100, step=1,
+            key="annee_academique_debut",
+        )
+        save_state("annee_academique_debut", int(debut))
+    ANNEE_ACADEMIQUE = f"{int(debut)}-{int(debut) + 1}"
+
+    with col_annee:
+        liste_annees = list(CONTEXT_TREE.keys())
+        index_annee = liste_annees.index(st.session_state.selected_annee) if st.session_state.selected_annee in liste_annees else None
+        annee_choisie = st.selectbox(
+            "🗓️ Année", options=liste_annees, index=index_annee,
+            placeholder="Choisir une année...", key="select_annee",
+        )
+        if annee_choisie != st.session_state.selected_annee:
+            st.session_state.selected_annee = annee_choisie
+            st.session_state.selected_filiere = None
+            save_state("selected_annee", annee_choisie)
+            save_state("selected_filiere", None)
+            st.rerun()
+
+    with col_filiere:
+        if st.session_state.selected_annee:
+            liste_filieres = CONTEXT_TREE[st.session_state.selected_annee]
+            index_filiere = (
+                liste_filieres.index(st.session_state.selected_filiere)
+                if st.session_state.selected_filiere in liste_filieres else None
+            )
+            filiere_choisie = st.selectbox(
+                "🎓 Filière", options=liste_filieres, index=index_filiere,
+                placeholder="Choisir une filière...", key="select_filiere",
+            )
+            if filiere_choisie != st.session_state.selected_filiere:
+                st.session_state.selected_filiere = filiere_choisie
+                save_state("selected_filiere", filiere_choisie)
+                st.rerun()
+        else:
+            st.selectbox(
+                "🎓 Filière", options=[], placeholder="Choisissez d'abord une année",
+                key="select_filiere_disabled", disabled=True,
+            )
+
+    if not st.session_state.selected_annee or not st.session_state.selected_filiere:
+        st.info("👆 Choisissez une année, puis une filière pour commencer.")
+        st.stop()
+
+    ANNEE = st.session_state.selected_annee
+    FILIERE = st.session_state.selected_filiere
+    CLE = cle_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
+    ctx = charger_contexte(CLE)
+
+    st.caption(f"📂 Espace de travail : **{ANNEE} — {FILIERE}** "
+               f"(les données sont indépendantes pour chaque filière)")
+
+    bandeau_annuler(ctx, CLE)
+
     st.subheader(f"Liste de référence — {ANNEE} / {FILIERE}")
 
     nb_notes_existantes = sum(len(v) for v in ctx["grades"].values())
