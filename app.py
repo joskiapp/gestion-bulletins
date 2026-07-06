@@ -441,16 +441,45 @@ liste_annees_academiques = charger_annees_academiques()
 if not liste_annees_academiques:
     st.sidebar.info("Aucune année académique. Créez-en une ci-dessous avec ➕.")
 
+if "confirmer_suppr_aa" not in st.session_state:
+    st.session_state.confirmer_suppr_aa = None
+
 for aa in liste_annees_academiques:
     aa_ouverte = (st.session_state.annee_academique == aa)
-    if st.sidebar.button(("📂 " if aa_ouverte else "📁 ") + aa, key=f"toggle_aa_{aa}", use_container_width=True):
-        if aa_ouverte:
-            st.session_state.annee_academique = None
-        else:
-            st.session_state.annee_academique = aa
-            st.session_state.selected_annee = None
-            st.session_state.selected_filiere = None
-        st.rerun()
+    col_toggle, col_del = st.sidebar.columns([5, 1])
+    with col_toggle:
+        if st.button(("📂 " if aa_ouverte else "📁 ") + aa, key=f"toggle_aa_{aa}", use_container_width=True):
+            if aa_ouverte:
+                st.session_state.annee_academique = None
+            else:
+                st.session_state.annee_academique = aa
+                st.session_state.selected_annee = None
+                st.session_state.selected_filiere = None
+            st.rerun()
+    with col_del:
+        if st.button("🗑️", key=f"del_aa_{aa}", help="Retirer cette année académique de la liste"):
+            st.session_state.confirmer_suppr_aa = aa
+            st.rerun()
+
+    if st.session_state.confirmer_suppr_aa == aa:
+        st.sidebar.warning(f"Retirer **{aa}** de la liste ? Les données restent enregistrées : "
+                            f"si vous recréez une année académique avec le même nom plus tard, "
+                            f"tout réapparaîtra tel quel.")
+        col_oui, col_non = st.sidebar.columns(2)
+        with col_oui:
+            if st.button("✅ Confirmer", key=f"confirm_del_{aa}", use_container_width=True):
+                liste_annees_academiques.remove(aa)
+                sauvegarder_annees_academiques(liste_annees_academiques)
+                if st.session_state.annee_academique == aa:
+                    st.session_state.annee_academique = None
+                    st.session_state.selected_annee = None
+                    st.session_state.selected_filiere = None
+                st.session_state.confirmer_suppr_aa = None
+                st.rerun()
+        with col_non:
+            if st.button("❌ Annuler", key=f"cancel_del_{aa}", use_container_width=True):
+                st.session_state.confirmer_suppr_aa = None
+                st.rerun()
 
     if aa_ouverte:
         for annee in CONTEXT_TREE:
