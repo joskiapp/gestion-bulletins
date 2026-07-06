@@ -746,3 +746,213 @@ with tab2:
                     idx_ref = valid_indices[pos] if pos is not None else None
                     resultats_analyse.append({
                         "Nom collé": nom_saisi,
+                        "Correspondance trouvée": options[idx_ref].split(" — ")[0] if idx_ref is not None else "❌ Aucune",
+                        "Confiance": f"{score*100:.0f}%",
+                        "Note": note_val if note_val is not None else "⚠️ invalide",
+                        "_idx_ref": idx_ref,
+                        "_note_val": note_val,
+                    })
+                ctx["analyse_collage"] = resultats_analyse
+
+            if ctx.get("analyse_collage"):
+                analyse = ctx["analyse_collage"]
+                apercu = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in analyse])
+                st.write("**Aperçu de l'association (vérifiez avant de valider) :**")
+                st.dataframe(apercu, use_container_width=True, hide_index=True)
+
+                nb_ok = sum(1 for r in analyse if r["_idx_ref"] is not None and r["_note_val"] is not None)
+                nb_pb = len(analyse) - nb_ok
+                st.caption(f"✅ {nb_ok} ligne(s) prête(s) à être enregistrée(s) — ⚠️ {nb_pb} problème(s) à corriger si non nul.")
+
+                if st.button("✅ Valider et enregistrer ces notes", type="primary", key=f"valider_collage_{CLE}"):
+                    sauvegarder_backup(ctx, f"lot de notes collées en {matiere_active}", grades=ctx["grades"])
+                    for r in analyse:
+                        if r["_idx_ref"] is not None and r["_note_val"] is not None:
+                            idx_str = str(r["_idx_ref"])
+                            if idx_str not in ctx["grades"]:
+                                ctx["grades"][idx_str] = {}
+                            ctx["grades"][idx_str][matiere_active] = r["_note_val"]
+                    enregistrer_matiere_si_nouvelle(matiere_active)
+                    ctx["analyse_collage"] = None
+                    ctx["collage_notes_df"] = pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500})
+                    persist_contexte(CLE, ctx)
+                    st.success(f"{nb_ok} note(s) enregistrée(s) en {matiere_active}. Récapitulatif mis à jour. "
+                               f"Vous pouvez annuler ce lot en haut de page si besoin.")
+                    st.rerun()
+
+# ============================================================
+# ONGLET 3 : RÉCAPITULATIF
+# ============================================================
+with tab3:
+    st.subheader("Récapitulatif — étudiants en lignes, matières en colonnes")
+    afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
+
+    resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
+
+    if valid_ref.empty:
+        st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
+    else:
+        col1, col2, col3 = st.columns([1, 1, 3])
+        with col1:
+            csv_dl = resultat_df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ CSV", csv_dl, f"recapitulatif_{ANNEE}_{FILIERE}.csv", "text/csv",
+                                key=f"dl_recap_csv_top_{CLE}")
+        with col2:
+            if st.button("🗑️ Effacer les notes", type="secondary", key=f"clear_notes_{CLE}"):
+                sauvegarder_backup(ctx, "notes effacées", grades=ctx["grades"])
+                ctx["grades"] = {}
+                persist_contexte(CLE, ctx)
+                st.success("Notes effacées. La liste de référence et les matières sont conservées. "
+                           "Vous pouvez l'annuler en haut de page si c'est une erreur.")
+                st.rerun()
+
+        nb_notes = sum(1 for idx in valid_ref.index if ctx["grades"].get(str(idx)))
+        st.caption(f"📝 {nb_notes} étudiant(s) avec au moins une note, sur {len(resultat_df)} au total "
+                   f"— {len(matieres)} matière(s) : {', '.join(matieres) if matieres else 'aucune'}.")
+
+        if not matieres:
+            st.info("Aucune matière saisie pour l'instant. Ajoutez des notes dans l'onglet '✍️ 2. Saisie des notes'.")
+        else:
+            st.caption("💡 Cliquez-glissez (ou clic droit → Copier) pour copier une plage de cellules vers Excel. "
+                       "Les colonnes Ordre/Nom/Prénom/Matricule restent figées lors du défilement horizontal.")
+            tableau_selectionnable(resultat_df, height=460, colonnes_figees=4, cle_widget=f"recap_{CLE}")
+
+            entete_texte = f"Année : {ANNEE} | Filière : {FILIERE}"
+
+            colx, coly = st.columns([1, 1])
+            with colx:
+                csv_contenu = entete_texte + "\n" + resultat_df.to_csv(index=False)
+                st.download_button("⬇️ Télécharger en CSV", csv_contenu.encode("utf-8"),
+                                    f"recapitulatif_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_recap_csv_{CLE}")
+            with coly:
+                buffer = BytesIO()
+                with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                    pd.DataFrame({entete_texte: []}).to_excel(writer, index=False, sheet_name="Récapitulatif", startrow=0)
+                    resultat_df.to_excel(writer, index=False, sheet_name="Récapitulatif", startrow=2)
+                st.download_button(
+                    "⬇️ Télécharger en Excel", buffer.getvalue(), f"recapitulatif_{ANNEE}_{FILIERE}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_recap_xlsx_{CLE}",
+                )
+
+# ============================================================
+# ONGLET 4 : LISTE DES DÉCISIONS
+# ============================================================
+with tab4:
+    st.subheader("Liste des décisions — validation des matières")
+    afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
+
+    resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
+
+    if valid_ref.empty:
+        st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
+    elif not matieres:
+        st.info("Aucune matière saisie pour l'instant. Ajoutez des notes dans l'onglet '✍️ 2. Saisie des notes'.")
+    else:
+        st.caption("Seuil de validation : note ≥ 12/20 dans **chaque** matière.")
+
+        def a_valide_tout(row):
+            for mat in matieres:
+                val = row[mat]
+                if pd.isna(val) or val < 12:
+                    return False
+            return True
+
+        resultat_df["Statut"] = resultat_df.apply(a_valide_tout, axis=1)
+        colonnes_affichage = ["Nom", "Prénom"] + matieres
+
+        valides_df = resultat_df[resultat_df["Statut"]][colonnes_affichage].reset_index(drop=True)
+        valides_df.insert(0, "Ordre", range(1, len(valides_df) + 1))
+
+        non_valides_df = resultat_df[~resultat_df["Statut"]][colonnes_affichage].reset_index(drop=True)
+        non_valides_df.insert(0, "Ordre", range(1, len(non_valides_df) + 1))
+
+        st.markdown(f"### ✅ Étudiants ayant validé toutes les matières ({len(valides_df)})")
+        if valides_df.empty:
+            st.caption("Aucun étudiant n'a encore validé toutes les matières.")
+        else:
+            tableau_selectionnable(valides_df, height=320, colonnes_figees=3, cle_widget=f"valides_{CLE}")
+
+        st.divider()
+        st.markdown(f"### ⚠️ Étudiants n'ayant pas validé au moins une matière ({len(non_valides_df)})")
+        st.caption("Toutes les matières sont affichées (validées et non validées) pour situer chaque étudiant.")
+        if non_valides_df.empty:
+            st.caption("Aucun étudiant dans cette situation.")
+        else:
+            tableau_selectionnable(non_valides_df, height=320, colonnes_figees=3, cle_widget=f"nonvalides_{CLE}")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button("⬇️ Validés (CSV)", valides_df.to_csv(index=False).encode("utf-8"),
+                                f"valides_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_valides_{CLE}")
+        with col2:
+            st.download_button("⬇️ Non validés (CSV)", non_valides_df.to_csv(index=False).encode("utf-8"),
+                                f"non_valides_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_nonvalides_{CLE}")
+
+# ============================================================
+# ONGLET 5 : BULLETIN INDIVIDUEL
+# ============================================================
+with tab5:
+    st.subheader("Bulletin individuel de l'étudiant")
+    afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
+
+    resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
+
+    if valid_ref.empty:
+        st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
+    else:
+        options_bulletin = {
+            idx: f"{valid_ref.loc[idx, 'Nom et Prénom']}"
+            + (f" — {valid_ref.loc[idx, 'Matricule']}" if str(valid_ref.loc[idx, "Matricule"]).strip() else "")
+            for idx in valid_ref.index
+        }
+
+        idx_choisi = st.selectbox(
+            "🔍 Tapez 2-3 lettres du nom ou prénom de l'étudiant",
+            options=list(options_bulletin.keys()), format_func=lambda i: options_bulletin[i],
+            index=None, placeholder="Rechercher un étudiant...", key=f"search_bulletin_{CLE}",
+        )
+
+        if idx_choisi is not None:
+            nom, prenom = split_nom_prenom(valid_ref.loc[idx_choisi, "Nom et Prénom"])
+            matricule = valid_ref.loc[idx_choisi, "Matricule"]
+            notes_etu = ctx["grades"].get(str(idx_choisi), {})
+
+            st.divider()
+            st.markdown(f"## 🎓 Bulletin — {nom} {prenom}")
+            infos = [f"**Année :** {ANNEE}", f"**Filière :** {FILIERE}"]
+            if matricule and str(matricule).strip():
+                infos.insert(0, f"**Matricule :** {matricule}")
+            st.markdown(" &nbsp;|&nbsp; ".join(infos))
+
+            if not matieres:
+                st.info("Aucune matière/note saisie pour l'instant.")
+            else:
+                lignes_bulletin = [{"Matière": mat, "Note /20": notes_etu.get(mat, "—")} for mat in matieres]
+                notes_num = [v for v in notes_etu.values() if isinstance(v, (int, float))]
+                bulletin_df = pd.DataFrame(lignes_bulletin)
+                st.dataframe(bulletin_df, use_container_width=True, hide_index=True)
+
+                moyenne = round(sum(notes_num) / len(notes_num), 2) if notes_num else None
+                if moyenne is not None:
+                    st.markdown(f"### 📊 Moyenne générale : **{moyenne} / 20**")
+                else:
+                    st.caption("Aucune note enregistrée pour cet étudiant.")
+
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    csv_bulletin = bulletin_df.to_csv(index=False).encode("utf-8")
+                    st.download_button("⬇️ Télécharger ce bulletin (CSV)", csv_bulletin,
+                                        f"bulletin_{nom}_{prenom}.csv", "text/csv",
+                                        key=f"dl_bulletin_{CLE}_{idx_choisi}")
+                with col2:
+                    lignes_html_impression = "".join(
+                        f"<tr><td>{html_lib.escape(str(l['Matière']))}</td><td>{html_lib.escape(str(l['Note /20']))}</td></tr>"
+                        for l in lignes_bulletin
+                    )
+                    moyenne_html = f"Moyenne générale : {moyenne} / 20" if moyenne is not None else "Aucune note enregistrée"
+                    sous_titre = " | ".join(infos).replace("**", "")
+                    bouton_impression(
+                        f"Bulletin — {nom} {prenom}", sous_titre, lignes_html_impression, moyenne_html,
+                        cle_widget=f"print_{CLE}_{idx_choisi}",
+                    )
+
