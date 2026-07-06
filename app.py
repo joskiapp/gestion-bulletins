@@ -507,18 +507,25 @@ for aa in liste_annees_academiques:
                         st.rerun()
 
 st.sidebar.divider()
-with st.sidebar.expander("➕ Créer une année"):
-    debut = st.number_input("Année de début", min_value=2000, max_value=2100, value=2025, step=1, key="aa_debut")
+with st.sidebar.expander("➕ Créer une année", expanded=True):
+    if "aa_prochaine_suggestion" in st.session_state:
+        st.session_state["aa_debut"] = st.session_state.pop("aa_prochaine_suggestion")
+    if "aa_debut" not in st.session_state:
+        st.session_state["aa_debut"] = 2025
+    debut = st.number_input("Année de début", min_value=2000, max_value=2100, step=1, key="aa_debut")
     fin = int(debut) + 1
-    st.caption(f"➡️ Année académique : **{int(debut)}-{fin}**")
+    nouvelle_aa = f"{int(debut)}-{fin}"
+    st.caption(f"➡️ Année académique : **{nouvelle_aa}**")
+    if nouvelle_aa in liste_annees_academiques:
+        st.caption("ℹ️ Cette année académique existe déjà dans la liste ci-dessus.")
     if st.button("✅ Valider", type="primary", key="valider_aa", use_container_width=True):
-        nouvelle_aa = f"{int(debut)}-{fin}"
         if nouvelle_aa not in liste_annees_academiques:
             liste_annees_academiques.append(nouvelle_aa)
             sauvegarder_annees_academiques(liste_annees_academiques)
         st.session_state.annee_academique = nouvelle_aa
         st.session_state.selected_annee = None
         st.session_state.selected_filiere = None
+        st.session_state.aa_prochaine_suggestion = fin
         st.rerun()
 
 st.title("🧮 Calculatrice de Bulletins")
