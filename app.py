@@ -8,10 +8,21 @@ import json
 import html as html_lib
 import difflib
 import unicodedata
+import re
+from io import BytesIO
 
 st.set_page_config(page_title="Calculatrice de Bulletins", page_icon="🧮", layout="wide")
 
 MAX_ROWS = 500
+
+# ---------- ARBRE ANNÉES / FILIÈRES ----------
+CONTEXT_TREE = {
+    "L1": ["TC"],
+    "L2": ["AGRN", "ESR", "NSAA", "STPAH", "STPV"],
+    "L3": ["AGRN", "ESR", "NSAA", "STPAH", "STPV"],
+    "M1": ["ASCA", "AGEPA", "AGRN", "NSAA", "STPAH", "STPV", "GDSCC", "IVAV"],
+    "M2": ["ASCA", "AGEPA", "FAUNE", "FORET", "IES", "AEA", "PA", "AGP", "PV", "NSAA", "GDSCC", "IVAV"],
+}
 
 
 # ---------- STOCKAGE PERSISTANT ----------
@@ -59,46 +70,53 @@ def load_state(key, default):
 
 init_db()
 
-# ---------- INITIALISATION DE L'ÉTAT ----------
-if "reference_df" not in st.session_state:
-    saved = load_state("reference_df", None)
-    if saved:
-        st.session_state.reference_df = pd.DataFrame(saved)
-    else:
-        st.session_state.reference_df = pd.DataFrame(
-            {"Nom et Prénom": [""] * MAX_ROWS, "Matricule": [""] * MAX_ROWS}
-        )
 
-if "matieres_df" not in st.session_state:
-    saved_mat = load_state("matieres_df", None)
-    if saved_mat:
-        st.session_state.matieres_df = pd.DataFrame(saved_mat)
-    else:
-        st.session_state.matieres_df = pd.DataFrame({"Matière": [""] * 50})
-
-if "grades" not in st.session_state:
-    # structure : { "index_etudiant": { "Matière": note, ... }, ... }
-    st.session_state.grades = load_state("grades", {})
-
-if "matieres" not in st.session_state:
-    st.session_state.matieres = load_state("matieres", [])  # liste des matières déjà utilisées
-
-if "annee_etudes" not in st.session_state:
-    st.session_state.annee_etudes = load_state("annee_etudes", "")
-
-if "filiere" not in st.session_state:
-    st.session_state.filiere = load_state("filiere", "")
+# ---------- GESTION DU CONTEXTE (ANNÉE + FILIÈRE) ----------
+def cle_contexte(annee, filiere):
+    brut = f"{annee}_{filiere}"
+    return re.sub(r"[^A-Za-z0-9_]", "_", brut)
 
 
-def persist_all():
-    save_state("reference_df", st.session_state.reference_df.to_dict(orient="list"))
-    save_state("grades", st.session_state.grades)
-    save_state("matieres", st.session_state.matieres)
-    save_state("matieres_df", st.session_state.matieres_df.to_dict(orient="list"))
-    save_state("annee_etudes", st.session_state.annee_etudes)
-    save_state("filiere", st.session_state.filiere)
+def contexte_par_defaut():
+    return {
+        "reference_df": pd.DataFrame({"Nom et Prénom": [""] * MAX_ROWS, "Matricule": [""] * MAX_ROWS}),
+        "matieres_df": pd.DataFrame({"Matière": [""] * 50}),
+        "grades": {},
+        "matieres": [],
+        "matiere_courante": "",
+        "collage_notes_df": pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500}),
+        "analyse_collage": None,
+    }
 
 
+def charger_contexte(cle):
+    """Charge (depuis le disque si besoin) les données de la filière sélectionnée, une seule fois."""
+    if "ctx_store" not in st.session_state:
+        st.session_state.ctx_store = {}
+    if cle not in st.session_state.ctx_store:
+        ref = load_state(f"reference_df::{cle}", None)
+        mat_df = load_state(f"matieres_df::{cle}", None)
+        st.session_state.ctx_store[cle] = {
+            "reference_df": pd.DataFrame(ref) if ref else contexte_par_defaut()["reference_df"],
+            "matieres_df": pd.DataFrame(mat_df) if mat_df else contexte_par_defaut()["matieres_df"],
+            "grades": load_state(f"grades::{cle}", {}),
+            "matieres": load_state(f"matieres::{cle}", []),
+            "matiere_courante": load_state(f"matiere_courante::{cle}", ""),
+            "collage_notes_df": pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500}),
+            "analyse_collage": None,
+        }
+    return st.session_state.ctx_store[cle]
+
+
+def persist_contexte(cle, ctx):
+    save_state(f"reference_df::{cle}", ctx["reference_df"].to_dict(orient="list"))
+    save_state(f"matieres_df::{cle}", ctx["matieres_df"].to_dict(orient="list"))
+    save_state(f"grades::{cle}", ctx["grades"])
+    save_state(f"matieres::{cle}", ctx["matieres"])
+    save_state(f"matiere_courante::{cle}", ctx["matiere_courante"])
+
+
+# ---------- OUTILS DE CORRESPONDANCE DE NOMS ----------
 def normaliser(texte):
     """Met en majuscule, retire les accents, trie les mots (insensible à l'ordre Nom/Prénom)."""
     texte = str(texte).strip().upper()
@@ -109,7 +127,7 @@ def normaliser(texte):
 
 
 def trouver_meilleure_correspondance(nom_a_chercher, noms_reference, seuil=0.55):
-    """Retourne (index dans noms_reference, score) du nom le plus proche, ou (None, 0)."""
+    """Retourne (index dans noms_reference, score) du nom le plus proche, ou (None, score)."""
     cible = normaliser(nom_a_chercher)
     if not cible:
         return None, 0
@@ -129,14 +147,14 @@ def split_nom_prenom(nom_complet):
     return nom, prenom
 
 
-def tableau_selectionnable(df, height=460, colonnes_figees=0):
+# ---------- TABLEAU HTML SÉLECTIONNABLE (copier-coller façon Excel) ----------
+def tableau_selectionnable(df, height=460, colonnes_figees=0, cle_widget="tbl"):
     """Affiche un tableau HTML où l'on peut cliquer-glisser pour sélectionner une plage
     de cellules (comme Excel), avec défilement automatique en bordure, copie via Ctrl+C
     ou clic droit → Copier. Les `colonnes_figees` premières colonnes restent visibles
     lors du défilement horizontal (comme 'Figer les volets' dans Excel)."""
     cols = list(df.columns)
 
-    # Calcul des décalages (offsets) cumulés pour les colonnes figées, en caractères -> px approx.
     largeurs = [max(len(str(c)), *(len(str(v)) for v in df[c].astype(str))) * 8 + 24 if len(df) else 120
                 for c in cols]
     offsets = [0]
@@ -179,21 +197,21 @@ def tableau_selectionnable(df, height=460, colonnes_figees=0):
       .ctx-menu div {{ padding: 8px 16px; color: #eee; cursor: pointer; white-space: nowrap; }}
       .ctx-menu div:hover {{ background: #2E74B5; }}
     </style>
-    <div class="sel-table-wrap" id="wrap">
-      <table class="sel-table" id="selTable">
+    <div class="sel-table-wrap" id="wrap_{cle_widget}">
+      <table class="sel-table" id="selTable_{cle_widget}">
         <thead><tr>{header_html}</tr></thead>
         <tbody>{body_html}</tbody>
       </table>
     </div>
-    <div class="copy-msg" id="copyMsg"></div>
-    <div class="ctx-menu" id="ctxMenu">
-      <div id="ctxCopy">📋 Copier</div>
+    <div class="copy-msg" id="copyMsg_{cle_widget}"></div>
+    <div class="ctx-menu" id="ctxMenu_{cle_widget}">
+      <div id="ctxCopy_{cle_widget}">📋 Copier</div>
     </div>
     <script>
-      const wrap = document.getElementById("wrap");
-      const table = document.getElementById("selTable");
-      const msg = document.getElementById("copyMsg");
-      const ctxMenu = document.getElementById("ctxMenu");
+      const wrap = document.getElementById("wrap_{cle_widget}");
+      const table = document.getElementById("selTable_{cle_widget}");
+      const msg = document.getElementById("copyMsg_{cle_widget}");
+      const ctxMenu = document.getElementById("ctxMenu_{cle_widget}");
       let isSelecting = false;
       let startCell = null;
       let autoScrollTimer = null;
@@ -216,7 +234,6 @@ def tableau_selectionnable(df, height=460, colonnes_figees=0):
         if (autoScrollTimer) {{ clearInterval(autoScrollTimer); autoScrollTimer = null; }}
       }}
 
-      // Défilement automatique quand le curseur approche le haut/bas pendant la sélection
       function handleAutoScroll(clientY) {{
         stopAutoScroll();
         const rect = wrap.getBoundingClientRect();
@@ -229,7 +246,7 @@ def tableau_selectionnable(df, height=460, colonnes_figees=0):
       }}
 
       table.addEventListener("mousedown", (e) => {{
-        if (e.button !== 0) return;  // seulement le clic gauche démarre une sélection
+        if (e.button !== 0) return;
         const td = e.target.closest("td");
         if (!td) return;
         isSelecting = true;
@@ -280,7 +297,6 @@ def tableau_selectionnable(df, height=460, colonnes_figees=0):
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") copySelection();
       }});
 
-      // Menu clic droit
       table.addEventListener("contextmenu", (e) => {{
         e.preventDefault();
         const td = e.target.closest("td");
@@ -292,7 +308,7 @@ def tableau_selectionnable(df, height=460, colonnes_figees=0):
         ctxMenu.style.display = "block";
       }});
 
-      document.getElementById("ctxCopy").addEventListener("click", () => {{
+      document.getElementById("ctxCopy_{cle_widget}").addEventListener("click", () => {{
         copySelection();
         ctxMenu.style.display = "none";
       }});
@@ -305,14 +321,14 @@ def tableau_selectionnable(df, height=460, colonnes_figees=0):
     components.html(page, height=height + 40, scrolling=True)
 
 
-def construire_resultat_df():
-    ref = st.session_state.reference_df
+def construire_resultat_df(ctx):
+    ref = ctx["reference_df"]
     valid_mask = ref["Nom et Prénom"].astype(str).str.strip() != ""
     valid_ref = ref[valid_mask].copy()
-    matieres = st.session_state.matieres
+    matieres = ctx["matieres"]
     rows = []
     for idx in valid_ref.index:
-        notes_etu = st.session_state.grades.get(str(idx), {})
+        notes_etu = ctx["grades"].get(str(idx), {})
         nom, prenom = split_nom_prenom(valid_ref.loc[idx, "Nom et Prénom"])
         row = {"Ordre": len(rows) + 1, "Nom": nom, "Prénom": prenom,
                "Matricule": valid_ref.loc[idx, "Matricule"]}
@@ -327,19 +343,44 @@ def construire_resultat_df():
     return pd.DataFrame(rows), matieres, valid_ref
 
 
-def afficher_entete_contexte():
-    """Affiche l'année d'études et la filière en en-tête, si renseignées."""
-    if st.session_state.annee_etudes or st.session_state.filiere:
-        morceaux = []
-        if st.session_state.annee_etudes:
-            morceaux.append(f"🗓️ **Année d'études :** {st.session_state.annee_etudes}")
-        if st.session_state.filiere:
-            morceaux.append(f"🎓 **Filière :** {st.session_state.filiere}")
-        st.info(" &nbsp;|&nbsp; ".join(morceaux))
+def afficher_entete_contexte(annee, filiere):
+    st.info(f"🗓️ **Année :** {annee} &nbsp;|&nbsp; 🎓 **Filière :** {filiere}")
 
+
+# ============================================================
+# BARRE LATÉRALE : NAVIGATION ANNÉE → FILIÈRE
+# ============================================================
+st.sidebar.title("🎓 Navigation")
+st.sidebar.caption("Choisissez une année, puis une filière.")
+
+if "selected_annee" not in st.session_state:
+    st.session_state.selected_annee = None
+if "selected_filiere" not in st.session_state:
+    st.session_state.selected_filiere = None
+
+for annee in CONTEXT_TREE:
+    with st.sidebar.expander(f"📁 {annee}", expanded=(st.session_state.selected_annee == annee)):
+        for filiere in CONTEXT_TREE[annee]:
+            est_actif = (st.session_state.selected_annee == annee and st.session_state.selected_filiere == filiere)
+            if st.button(("✅ " if est_actif else "") + filiere, key=f"nav_{annee}_{filiere}",
+                         use_container_width=True):
+                st.session_state.selected_annee = annee
+                st.session_state.selected_filiere = filiere
+                st.rerun()
 
 st.title("🧮 Calculatrice de Bulletins")
-st.caption("Liste de référence → saisie désordonnée des notes → résultat toujours dans l'ordre officiel")
+
+if not st.session_state.selected_annee or not st.session_state.selected_filiere:
+    st.info("👈 Choisissez une année et une filière dans le menu à gauche pour commencer.")
+    st.stop()
+
+ANNEE = st.session_state.selected_annee
+FILIERE = st.session_state.selected_filiere
+CLE = cle_contexte(ANNEE, FILIERE)
+ctx = charger_contexte(CLE)
+
+st.caption(f"📂 Espace de travail : **{ANNEE} — {FILIERE}** "
+           f"(les données sont indépendantes pour chaque filière)")
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "📋 1. Liste de référence", "✍️ 2. Saisie des notes",
@@ -350,38 +391,22 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # ONGLET 1 : LISTE DE RÉFÉRENCE
 # ============================================================
 with tab1:
-    st.subheader("Liste de référence (ordre officiel de la scolarité)")
+    st.subheader(f"Liste de référence — {ANNEE} / {FILIERE}")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        nouvelle_annee = st.text_input("🗓️ Année d'études", value=st.session_state.annee_etudes,
-                                        placeholder="Ex: 2025-2026", key="annee_input")
-    with col_b:
-        nouvelle_filiere = st.text_input("🎓 Filière", value=st.session_state.filiere,
-                                          placeholder="Ex: Licence 2 Informatique", key="filiere_input")
-    if nouvelle_annee != st.session_state.annee_etudes or nouvelle_filiere != st.session_state.filiere:
-        st.session_state.annee_etudes = nouvelle_annee
-        st.session_state.filiere = nouvelle_filiere
-        persist_all()
-
-    st.divider()
-
-    nb_notes_existantes = sum(len(v) for v in st.session_state.grades.values())
-    if st.button("🗑️ Effacer la liste de référence (garde les résultats)", type="secondary"):
-        st.session_state.reference_df = pd.DataFrame(
-            {"Nom et Prénom": [""] * MAX_ROWS, "Matricule": [""] * MAX_ROWS}
-        )
-        persist_all()
+    nb_notes_existantes = sum(len(v) for v in ctx["grades"].values())
+    if st.button("🗑️ Effacer la liste de référence (garde les résultats)", type="secondary", key=f"clear_ref_{CLE}"):
+        ctx["reference_df"] = pd.DataFrame({"Nom et Prénom": [""] * MAX_ROWS, "Matricule": [""] * MAX_ROWS})
+        persist_contexte(CLE, ctx)
         st.success("Liste de référence effacée. Les notes déjà saisies sont conservées.")
         st.rerun()
     if nb_notes_existantes > 0:
         st.caption(
-            "⚠️ Des notes existent déjà. Si vous collez une liste totalement différente (nouvelle année), "
+            "⚠️ Des notes existent déjà. Si vous collez une liste totalement différente, "
             "pensez à aussi effacer les résultats dans l'onglet '📑 3. Récapitulatif', car les anciennes "
             "notes resteraient associées aux nouvelles positions de la liste."
         )
 
-    nb_etudiants = (st.session_state.reference_df["Nom et Prénom"].astype(str).str.strip() != "").sum()
+    nb_etudiants = (ctx["reference_df"]["Nom et Prénom"].astype(str).str.strip() != "").sum()
     st.caption(f"👥 {nb_etudiants} étudiant(s) actuellement reconnu(s) dans la liste.")
 
     st.info(
@@ -393,66 +418,55 @@ with tab1:
     )
 
     edited_df = st.data_editor(
-        st.session_state.reference_df,
-        num_rows="fixed",
-        use_container_width=True,
-        height=215,
-        key="reference_editor",
+        ctx["reference_df"], num_rows="fixed", use_container_width=True,
+        height=215, key=f"reference_editor_{CLE}",
     )
-
-    # Reconnaissance automatique : dès que le tableau change, on l'enregistre immédiatement
-    if not edited_df.equals(st.session_state.reference_df):
-        st.session_state.reference_df = edited_df
-        persist_all()
+    if not edited_df.equals(ctx["reference_df"]):
+        ctx["reference_df"] = edited_df
+        persist_contexte(CLE, ctx)
         st.rerun()
 
     with st.expander("📋 Vue sélectionnable (cliquez-glissez ou clic droit → Copier) — colonne Nom figée"):
-        vue_ref = st.session_state.reference_df[
-            st.session_state.reference_df["Nom et Prénom"].astype(str).str.strip() != ""
+        vue_ref = ctx["reference_df"][
+            ctx["reference_df"]["Nom et Prénom"].astype(str).str.strip() != ""
         ].reset_index(drop=True)
         if vue_ref.empty:
             st.caption("Aucune donnée à afficher pour l'instant.")
         else:
-            tableau_selectionnable(vue_ref, height=300, colonnes_figees=1)
+            tableau_selectionnable(vue_ref, height=300, colonnes_figees=1, cle_widget=f"ref_{CLE}")
 
     st.divider()
     st.write("**📚 Liste des matières** (collez-en plusieurs à la fois, une par ligne)")
     edited_matieres_df = st.data_editor(
-        st.session_state.matieres_df,
-        num_rows="fixed",
-        use_container_width=True,
-        height=215,
-        key="matieres_editor",
+        ctx["matieres_df"], num_rows="fixed", use_container_width=True,
+        height=215, key=f"matieres_editor_{CLE}",
     )
-    if not edited_matieres_df.equals(st.session_state.matieres_df):
-        st.session_state.matieres_df = edited_matieres_df
-        nouvelles_matieres = [
-            m.strip() for m in edited_matieres_df["Matière"].astype(str).tolist() if m.strip()
-        ]
-        # on garde l'ordre d'apparition, sans doublons
+    if not edited_matieres_df.equals(ctx["matieres_df"]):
+        ctx["matieres_df"] = edited_matieres_df
+        nouvelles_matieres = [m.strip() for m in edited_matieres_df["Matière"].astype(str).tolist() if m.strip()]
         vues = []
         for m in nouvelles_matieres:
             if m not in vues:
                 vues.append(m)
-        st.session_state.matieres = vues
-        persist_all()
+        ctx["matieres"] = vues
+        persist_contexte(CLE, ctx)
         st.rerun()
 
     with st.expander("📋 Vue sélectionnable des matières (cliquez-glissez ou clic droit → Copier)"):
-        vue_mat = pd.DataFrame({"Matière": st.session_state.matieres})
+        vue_mat = pd.DataFrame({"Matière": ctx["matieres"]})
         if vue_mat.empty:
             st.caption("Aucune matière à afficher pour l'instant.")
         else:
-            tableau_selectionnable(vue_mat, height=220)
+            tableau_selectionnable(vue_mat, height=220, cle_widget=f"mat_{CLE}")
 
 # ============================================================
-# ONGLET 2 : SAISIE DES NOTES (recherche par nom, ordre libre)
+# ONGLET 2 : SAISIE DES NOTES
 # ============================================================
 with tab2:
     st.subheader("Saisie des notes (dans n'importe quel ordre)")
-    afficher_entete_contexte()
+    afficher_entete_contexte(ANNEE, FILIERE)
 
-    ref = st.session_state.reference_df
+    ref = ctx["reference_df"]
     valid_mask = ref["Nom et Prénom"].astype(str).str.strip() != ""
     valid_indices = ref.index[valid_mask].tolist()
 
@@ -462,7 +476,7 @@ with tab2:
         mode = st.radio(
             "Comment voulez-vous saisir les notes ?",
             ["✍️ Saisie pêle-mêle (une note à la fois)", "📋 Collage de notes déjà préparées (Excel)"],
-            horizontal=True, key="mode_saisie",
+            horizontal=True, key=f"mode_saisie_{CLE}",
         )
         st.divider()
 
@@ -472,57 +486,51 @@ with tab2:
             for idx in valid_indices
         }
 
-        # --- Choix de la matière : reste fixe tant qu'on ne la change pas volontairement ---
         NOUVELLE = "➕ Nouvelle matière..."
-        if "matiere_courante" not in st.session_state:
-            st.session_state.matiere_courante = st.session_state.matieres[-1] if st.session_state.matieres else ""
+        if not ctx["matiere_courante"] and ctx["matieres"]:
+            ctx["matiere_courante"] = ctx["matieres"][-1]
 
         choix_matiere = st.selectbox(
             "📚 Matière (tapez pour rechercher parmi les matières existantes, ou choisissez 'Nouvelle matière')",
-            options=st.session_state.matieres + [NOUVELLE],
-            index=(st.session_state.matieres.index(st.session_state.matiere_courante)
-                   if st.session_state.matiere_courante in st.session_state.matieres else
-                   (len(st.session_state.matieres) if st.session_state.matieres else 0)),
-            key="matiere_select",
+            options=ctx["matieres"] + [NOUVELLE],
+            index=(ctx["matieres"].index(ctx["matiere_courante"])
+                   if ctx["matiere_courante"] in ctx["matieres"] else
+                   (len(ctx["matieres"]) if ctx["matieres"] else 0)),
+            key=f"matiere_select_{CLE}",
         )
         if choix_matiere == NOUVELLE:
-            nouvelle_matiere = st.text_input("Nom de la nouvelle matière", key="nouvelle_matiere_input")
+            nouvelle_matiere = st.text_input("Nom de la nouvelle matière", key=f"nouvelle_matiere_input_{CLE}")
             matiere_active = nouvelle_matiere.strip()
         else:
             matiere_active = choix_matiere
-            st.session_state.matiere_courante = choix_matiere
+            ctx["matiere_courante"] = choix_matiere
 
         def enregistrer_matiere_si_nouvelle(matiere):
-            if matiere not in st.session_state.matieres:
-                st.session_state.matieres.append(matiere)
-                st.session_state.matiere_courante = matiere
-                colonne = st.session_state.matieres_df["Matière"].astype(str).tolist()
+            if matiere not in ctx["matieres"]:
+                ctx["matieres"].append(matiere)
+                ctx["matiere_courante"] = matiere
+                colonne = ctx["matieres_df"]["Matière"].astype(str).tolist()
                 premiere_vide = next((i for i, v in enumerate(colonne) if not v.strip()), None)
                 if premiere_vide is not None:
-                    st.session_state.matieres_df.loc[premiere_vide, "Matière"] = matiere
+                    ctx["matieres_df"].loc[premiere_vide, "Matière"] = matiere
                 else:
-                    st.session_state.matieres_df = pd.concat(
-                        [st.session_state.matieres_df, pd.DataFrame({"Matière": [matiere]})],
-                        ignore_index=True,
+                    ctx["matieres_df"] = pd.concat(
+                        [ctx["matieres_df"], pd.DataFrame({"Matière": [matiere]})], ignore_index=True,
                     )
 
         st.caption(f"Matière active : **{matiere_active or '(aucune)'}** — elle restera sélectionnée pour les saisies suivantes.")
 
         if mode.startswith("✍️"):
-            # ================= MODE SAISIE PÊLE-MÊLE =================
-            with st.form("form_saisie_note", clear_on_submit=True):
+            with st.form(f"form_saisie_note_{CLE}", clear_on_submit=True):
                 col1, col2 = st.columns([3, 1])
                 with col1:
                     chosen_idx = st.selectbox(
                         "🔍 Tapez 2-3 lettres du nom ou prénom pour le retrouver",
-                        options=list(options.keys()),
-                        format_func=lambda i: options[i],
-                        index=None,
-                        placeholder="Rechercher un étudiant...",
-                        key="search_student",
+                        options=list(options.keys()), format_func=lambda i: options[i],
+                        index=None, placeholder="Rechercher un étudiant...", key=f"search_student_{CLE}",
                     )
                 with col2:
-                    note_str = st.text_input("Note /20", value="", placeholder="Ex: 14.5", key="note_input")
+                    note_str = st.text_input("Note /20", value="", placeholder="Ex: 14.5", key=f"note_input_{CLE}")
 
                 submitted = st.form_submit_button("✅ Enregistrer (ou appuyez sur Entrée)", type="primary")
                 if submitted:
@@ -540,19 +548,15 @@ with tab2:
                         st.warning("La note doit être comprise entre 0 et 20.")
                     else:
                         idx_str = str(chosen_idx)
-                        if idx_str not in st.session_state.grades:
-                            st.session_state.grades[idx_str] = {}
-                        st.session_state.grades[idx_str][matiere_active] = note_val
+                        if idx_str not in ctx["grades"]:
+                            ctx["grades"][idx_str] = {}
+                        ctx["grades"][idx_str][matiere_active] = note_val
                         enregistrer_matiere_si_nouvelle(matiere_active)
-                        persist_all()
+                        persist_contexte(CLE, ctx)
                         st.success(f"Note enregistrée pour {options[chosen_idx]} en {matiere_active}. "
                                    f"Récapitulatif et bulletin mis à jour.")
 
         else:
-            # ================= MODE COLLAGE DE NOTES DÉJÀ PRÉPARÉES =================
-            if "collage_notes_df" not in st.session_state:
-                st.session_state.collage_notes_df = pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500})
-
             st.info(
                 "📌 Collez ici la liste déjà préparée par l'enseignant (Nom et Prénom dans une colonne, "
                 "Note dans l'autre — peu importe l'ordre). L'application recherche automatiquement "
@@ -560,17 +564,18 @@ with tab2:
             )
 
             edited_collage = st.data_editor(
-                st.session_state.collage_notes_df, num_rows="fixed", use_container_width=True,
-                height=420, key="collage_editor",
+                ctx["collage_notes_df"], num_rows="fixed", use_container_width=True,
+                height=420, key=f"collage_editor_{CLE}",
             )
-            if not edited_collage.equals(st.session_state.collage_notes_df):
-                st.session_state.collage_notes_df = edited_collage
+            if not edited_collage.equals(ctx["collage_notes_df"]):
+                ctx["collage_notes_df"] = edited_collage
                 st.rerun()
 
-            if st.button("🔎 Analyser et associer les noms", type="primary", disabled=not matiere_active):
+            if st.button("🔎 Analyser et associer les noms", type="primary", disabled=not matiere_active,
+                         key=f"analyser_{CLE}"):
                 noms_ref_valides = [options[idx].split(" — ")[0] for idx in valid_indices]
                 resultats_analyse = []
-                for _, row in st.session_state.collage_notes_df.iterrows():
+                for _, row in ctx["collage_notes_df"].iterrows():
                     nom_saisi = str(row["Nom et Prénom"]).strip()
                     note_brute = str(row["Note"]).strip().replace(",", ".")
                     if not nom_saisi:
@@ -589,10 +594,10 @@ with tab2:
                         "_idx_ref": idx_ref,
                         "_note_val": note_val,
                     })
-                st.session_state.analyse_collage = resultats_analyse
+                ctx["analyse_collage"] = resultats_analyse
 
-            if st.session_state.get("analyse_collage"):
-                analyse = st.session_state.analyse_collage
+            if ctx.get("analyse_collage"):
+                analyse = ctx["analyse_collage"]
                 apercu = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in analyse])
                 st.write("**Aperçu de l'association (vérifiez avant de valider) :**")
                 st.dataframe(apercu, use_container_width=True, hide_index=True)
@@ -601,28 +606,28 @@ with tab2:
                 nb_pb = len(analyse) - nb_ok
                 st.caption(f"✅ {nb_ok} ligne(s) prête(s) à être enregistrée(s) — ⚠️ {nb_pb} problème(s) à corriger si non nul.")
 
-                if st.button("✅ Valider et enregistrer ces notes", type="primary"):
+                if st.button("✅ Valider et enregistrer ces notes", type="primary", key=f"valider_collage_{CLE}"):
                     for r in analyse:
                         if r["_idx_ref"] is not None and r["_note_val"] is not None:
                             idx_str = str(r["_idx_ref"])
-                            if idx_str not in st.session_state.grades:
-                                st.session_state.grades[idx_str] = {}
-                            st.session_state.grades[idx_str][matiere_active] = r["_note_val"]
+                            if idx_str not in ctx["grades"]:
+                                ctx["grades"][idx_str] = {}
+                            ctx["grades"][idx_str][matiere_active] = r["_note_val"]
                     enregistrer_matiere_si_nouvelle(matiere_active)
-                    persist_all()
-                    st.session_state.analyse_collage = None
-                    st.session_state.collage_notes_df = pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500})
+                    ctx["analyse_collage"] = None
+                    ctx["collage_notes_df"] = pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500})
+                    persist_contexte(CLE, ctx)
                     st.success(f"{nb_ok} note(s) enregistrée(s) en {matiere_active}. Récapitulatif mis à jour.")
                     st.rerun()
 
 # ============================================================
-# ONGLET 3 : RÉCAPITULATIF (étudiants en lignes, matières en colonnes)
+# ONGLET 3 : RÉCAPITULATIF
 # ============================================================
 with tab3:
     st.subheader("Récapitulatif — étudiants en lignes, matières en colonnes")
-    afficher_entete_contexte()
+    afficher_entete_contexte(ANNEE, FILIERE)
 
-    resultat_df, matieres, valid_ref = construire_resultat_df()
+    resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
 
     if valid_ref.empty:
         st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
@@ -630,15 +635,16 @@ with tab3:
         col1, col2, col3 = st.columns([1, 1, 3])
         with col1:
             csv_dl = resultat_df.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ CSV", csv_dl, "recapitulatif.csv", "text/csv", key="dl_recap_csv_top")
+            st.download_button("⬇️ CSV", csv_dl, f"recapitulatif_{ANNEE}_{FILIERE}.csv", "text/csv",
+                                key=f"dl_recap_csv_top_{CLE}")
         with col2:
-            if st.button("🗑️ Effacer les notes", type="secondary"):
-                st.session_state.grades = {}
-                persist_all()
+            if st.button("🗑️ Effacer les notes", type="secondary", key=f"clear_notes_{CLE}"):
+                ctx["grades"] = {}
+                persist_contexte(CLE, ctx)
                 st.success("Notes effacées. La liste de référence et les matières sont conservées.")
                 st.rerun()
 
-        nb_notes = sum(1 for idx in valid_ref.index if st.session_state.grades.get(str(idx)))
+        nb_notes = sum(1 for idx in valid_ref.index if ctx["grades"].get(str(idx)))
         st.caption(f"📝 {nb_notes} étudiant(s) avec au moins une note, sur {len(resultat_df)} au total "
                    f"— {len(matieres)} matière(s) : {', '.join(matieres) if matieres else 'aucune'}.")
 
@@ -647,32 +653,23 @@ with tab3:
         else:
             st.caption("💡 Cliquez-glissez (ou clic droit → Copier) pour copier une plage de cellules vers Excel. "
                        "Les colonnes Ordre/Nom/Prénom/Matricule restent figées lors du défilement horizontal.")
-            tableau_selectionnable(resultat_df, height=460, colonnes_figees=4)
+            tableau_selectionnable(resultat_df, height=460, colonnes_figees=4, cle_widget=f"recap_{CLE}")
 
-            entete_lignes = []
-            if st.session_state.annee_etudes:
-                entete_lignes.append(f"Année d'études : {st.session_state.annee_etudes}")
-            if st.session_state.filiere:
-                entete_lignes.append(f"Filière : {st.session_state.filiere}")
-            entete_texte = " | ".join(entete_lignes)
+            entete_texte = f"Année : {ANNEE} | Filière : {FILIERE}"
 
             colx, coly = st.columns([1, 1])
             with colx:
-                csv_contenu = (entete_texte + "\n" if entete_texte else "") + resultat_df.to_csv(index=False)
+                csv_contenu = entete_texte + "\n" + resultat_df.to_csv(index=False)
                 st.download_button("⬇️ Télécharger en CSV", csv_contenu.encode("utf-8"),
-                                    "recapitulatif.csv", "text/csv", key="dl_recap_csv")
+                                    f"recapitulatif_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_recap_csv_{CLE}")
             with coly:
-                from io import BytesIO
                 buffer = BytesIO()
                 with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                    start_row = 0
-                    if entete_texte:
-                        pd.DataFrame({entete_texte: []}).to_excel(writer, index=False, sheet_name="Récapitulatif", startrow=0)
-                        start_row = 2
-                    resultat_df.to_excel(writer, index=False, sheet_name="Récapitulatif", startrow=start_row)
+                    pd.DataFrame({entete_texte: []}).to_excel(writer, index=False, sheet_name="Récapitulatif", startrow=0)
+                    resultat_df.to_excel(writer, index=False, sheet_name="Récapitulatif", startrow=2)
                 st.download_button(
-                    "⬇️ Télécharger en Excel", buffer.getvalue(), "recapitulatif.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_recap_xlsx",
+                    "⬇️ Télécharger en Excel", buffer.getvalue(), f"recapitulatif_{ANNEE}_{FILIERE}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_recap_xlsx_{CLE}",
                 )
 
 # ============================================================
@@ -680,9 +677,9 @@ with tab3:
 # ============================================================
 with tab4:
     st.subheader("Bulletin individuel de l'étudiant")
-    afficher_entete_contexte()
+    afficher_entete_contexte(ANNEE, FILIERE)
 
-    resultat_df, matieres, valid_ref = construire_resultat_df()
+    resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
 
     if valid_ref.empty:
         st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
@@ -695,30 +692,21 @@ with tab4:
 
         idx_choisi = st.selectbox(
             "🔍 Tapez 2-3 lettres du nom ou prénom de l'étudiant",
-            options=list(options_bulletin.keys()),
-            format_func=lambda i: options_bulletin[i],
-            index=None,
-            placeholder="Rechercher un étudiant...",
-            key="search_bulletin",
+            options=list(options_bulletin.keys()), format_func=lambda i: options_bulletin[i],
+            index=None, placeholder="Rechercher un étudiant...", key=f"search_bulletin_{CLE}",
         )
 
         if idx_choisi is not None:
-            nom_complet, prenom_matricule = None, None
             nom, prenom = split_nom_prenom(valid_ref.loc[idx_choisi, "Nom et Prénom"])
             matricule = valid_ref.loc[idx_choisi, "Matricule"]
-            notes_etu = st.session_state.grades.get(str(idx_choisi), {})
+            notes_etu = ctx["grades"].get(str(idx_choisi), {})
 
             st.divider()
             st.markdown(f"## 🎓 Bulletin — {nom} {prenom}")
-            infos = []
+            infos = [f"**Année :** {ANNEE}", f"**Filière :** {FILIERE}"]
             if matricule and str(matricule).strip():
-                infos.append(f"**Matricule :** {matricule}")
-            if st.session_state.annee_etudes:
-                infos.append(f"**Année d'études :** {st.session_state.annee_etudes}")
-            if st.session_state.filiere:
-                infos.append(f"**Filière :** {st.session_state.filiere}")
-            if infos:
-                st.markdown(" &nbsp;|&nbsp; ".join(infos))
+                infos.insert(0, f"**Matricule :** {matricule}")
+            st.markdown(" &nbsp;|&nbsp; ".join(infos))
 
             if not matieres:
                 st.info("Aucune matière/note saisie pour l'instant.")
@@ -734,8 +722,6 @@ with tab4:
                 else:
                     st.caption("Aucune note enregistrée pour cet étudiant.")
 
-                col1, col2 = st.columns([1, 4])
-                with col1:
-                    csv_bulletin = bulletin_df.to_csv(index=False).encode("utf-8")
-                    st.download_button("⬇️ Télécharger ce bulletin (CSV)", csv_bulletin,
-                                        f"bulletin_{nom}_{prenom}.csv", "text/csv")
+                csv_bulletin = bulletin_df.to_csv(index=False).encode("utf-8")
+                st.download_button("⬇️ Télécharger ce bulletin (CSV)", csv_bulletin,
+                                    f"bulletin_{nom}_{prenom}.csv", "text/csv", key=f"dl_bulletin_{CLE}_{idx_choisi}")
