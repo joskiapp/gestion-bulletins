@@ -506,12 +506,27 @@ for aa in liste_annees_academiques:
                         st.session_state.selected_filiere = filiere
                         st.rerun()
 
+def suggestion_prochaine_annee(liste):
+    """Calcule l'année de début suivante à partir de la liste réelle déjà créée."""
+    debuts = []
+    for aa in liste:
+        try:
+            debuts.append(int(aa.split("-")[0]))
+        except (ValueError, IndexError):
+            pass
+    return max(debuts) + 1 if debuts else 2025
+
+
 st.sidebar.divider()
 with st.sidebar.expander("➕ Créer une année", expanded=True):
-    if "aa_prochaine_suggestion" in st.session_state:
-        st.session_state["aa_debut"] = st.session_state.pop("aa_prochaine_suggestion")
+    # Important : on ne modifie jamais st.session_state["aa_debut"] après la création
+    # du widget dans le même passage du script (Streamlit l'interdit). On utilise donc
+    # un indicateur temporaire, consommé ICI, avant l'appel à st.number_input ci-dessous.
+    if "aa_debut_a_appliquer" in st.session_state:
+        st.session_state["aa_debut"] = st.session_state.pop("aa_debut_a_appliquer")
     if "aa_debut" not in st.session_state:
-        st.session_state["aa_debut"] = 2025
+        st.session_state["aa_debut"] = suggestion_prochaine_annee(liste_annees_academiques)
+
     debut = st.number_input("Année de début", min_value=2000, max_value=2100, step=1, key="aa_debut")
     fin = int(debut) + 1
     nouvelle_aa = f"{int(debut)}-{fin}"
@@ -525,7 +540,9 @@ with st.sidebar.expander("➕ Créer une année", expanded=True):
         st.session_state.annee_academique = nouvelle_aa
         st.session_state.selected_annee = None
         st.session_state.selected_filiere = None
-        st.session_state.aa_prochaine_suggestion = fin
+        # On ne touche pas "aa_debut" ici (déjà instancié) : on programme le changement
+        # pour le PROCHAIN passage du script, via l'indicateur temporaire ci-dessus.
+        st.session_state["aa_debut_a_appliquer"] = suggestion_prochaine_annee(liste_annees_academiques)
         st.rerun()
 
 st.title("🧮 Calculatrice de Bulletins")
