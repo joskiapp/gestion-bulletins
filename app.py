@@ -423,78 +423,82 @@ def afficher_entete_contexte(annee_academique, annee, filiere):
             f"🗓️ **Année :** {annee} &nbsp;|&nbsp; 🎓 **Filière :** {filiere}")
 
 
+
 # ============================================================
-# NIVEAU 0 : CHOIX / CRÉATION DE L'ANNÉE ACADÉMIQUE
+# BARRE LATÉRALE : MENU ACCORDÉON (Année académique → Année → Filière)
 # ============================================================
+st.sidebar.title("🎓 Navigation")
+
 if "annee_academique" not in st.session_state:
     st.session_state.annee_academique = None
-
-if st.session_state.annee_academique is None:
-    st.title("🧮 Calculatrice de Bulletins")
-    st.subheader("📅 Choisissez ou créez une année académique")
-
-    liste_annees_academiques = charger_annees_academiques()
-
-    if liste_annees_academiques:
-        st.write("Années académiques déjà créées :")
-        for aa in liste_annees_academiques:
-            if st.button(f"📅 {aa}", key=f"select_aa_{aa}", use_container_width=True):
-                st.session_state.annee_academique = aa
-                st.rerun()
-    else:
-        st.info("Aucune année académique créée pour l'instant. Créez-en une ci-dessous avec le bouton ➕.")
-
-    with st.expander("➕ Créer une nouvelle année académique", expanded=True):
-        debut = st.number_input("Année de début", min_value=2000, max_value=2100, value=2025, step=1, key="aa_debut")
-        fin = int(debut) + 1
-        st.caption(f"➡️ Année académique correspondante : **{int(debut)}-{fin}**")
-        if st.button("✅ Valider cette année académique", type="primary", key="valider_aa"):
-            nouvelle_aa = f"{int(debut)}-{fin}"
-            if nouvelle_aa not in liste_annees_academiques:
-                liste_annees_academiques.append(nouvelle_aa)
-                sauvegarder_annees_academiques(liste_annees_academiques)
-            st.session_state.annee_academique = nouvelle_aa
-            st.rerun()
-
-    st.stop()
-
-ANNEE_ACADEMIQUE = st.session_state.annee_academique
-
-# ============================================================
-# BARRE LATÉRALE : NAVIGATION ANNÉE → FILIÈRE
-# ============================================================
-st.sidebar.success(f"📅 Année académique : **{ANNEE_ACADEMIQUE}**")
-if st.sidebar.button("🔁 Changer d'année académique", use_container_width=True):
-    st.session_state.annee_academique = None
-    st.session_state.selected_annee = None
-    st.session_state.selected_filiere = None
-    st.rerun()
-st.sidebar.divider()
-
-st.sidebar.title("🎓 Navigation")
-st.sidebar.caption("Choisissez une année, puis une filière.")
-
 if "selected_annee" not in st.session_state:
     st.session_state.selected_annee = None
 if "selected_filiere" not in st.session_state:
     st.session_state.selected_filiere = None
 
-for annee in CONTEXT_TREE:
-    with st.sidebar.expander(f"📁 {annee}", expanded=(st.session_state.selected_annee == annee)):
-        for filiere in CONTEXT_TREE[annee]:
-            est_actif = (st.session_state.selected_annee == annee and st.session_state.selected_filiere == filiere)
-            if st.button(("✅ " if est_actif else "") + filiere, key=f"nav_{annee}_{filiere}",
-                         use_container_width=True):
-                st.session_state.selected_annee = annee
-                st.session_state.selected_filiere = filiere
+liste_annees_academiques = charger_annees_academiques()
+
+if not liste_annees_academiques:
+    st.sidebar.info("Aucune année académique. Créez-en une ci-dessous avec ➕.")
+
+for aa in liste_annees_academiques:
+    aa_ouverte = (st.session_state.annee_academique == aa)
+    if st.sidebar.button(("📂 " if aa_ouverte else "📁 ") + aa, key=f"toggle_aa_{aa}", use_container_width=True):
+        if aa_ouverte:
+            st.session_state.annee_academique = None
+        else:
+            st.session_state.annee_academique = aa
+            st.session_state.selected_annee = None
+            st.session_state.selected_filiere = None
+        st.rerun()
+
+    if aa_ouverte:
+        for annee in CONTEXT_TREE:
+            annee_ouverte = (st.session_state.selected_annee == annee)
+            if st.sidebar.button(
+                ("　　📂 " if annee_ouverte else "　　📁 ") + annee,
+                key=f"toggle_annee_{aa}_{annee}", use_container_width=True,
+            ):
+                if annee_ouverte:
+                    st.session_state.selected_annee = None
+                    st.session_state.selected_filiere = None
+                else:
+                    st.session_state.selected_annee = annee
+                    st.session_state.selected_filiere = None
                 st.rerun()
+
+            if annee_ouverte:
+                for filiere in CONTEXT_TREE[annee]:
+                    est_actif = (st.session_state.selected_filiere == filiere)
+                    if st.sidebar.button(
+                        ("　　　　✅ " if est_actif else "　　　　　") + filiere,
+                        key=f"nav_{aa}_{annee}_{filiere}", use_container_width=True,
+                    ):
+                        st.session_state.selected_filiere = filiere
+                        st.rerun()
+
+st.sidebar.divider()
+with st.sidebar.expander("➕ Créer une année"):
+    debut = st.number_input("Année de début", min_value=2000, max_value=2100, value=2025, step=1, key="aa_debut")
+    fin = int(debut) + 1
+    st.caption(f"➡️ Année académique : **{int(debut)}-{fin}**")
+    if st.button("✅ Valider", type="primary", key="valider_aa", use_container_width=True):
+        nouvelle_aa = f"{int(debut)}-{fin}"
+        if nouvelle_aa not in liste_annees_academiques:
+            liste_annees_academiques.append(nouvelle_aa)
+            sauvegarder_annees_academiques(liste_annees_academiques)
+        st.session_state.annee_academique = nouvelle_aa
+        st.session_state.selected_annee = None
+        st.session_state.selected_filiere = None
+        st.rerun()
 
 st.title("🧮 Calculatrice de Bulletins")
 
-if not st.session_state.selected_annee or not st.session_state.selected_filiere:
-    st.info("👈 Choisissez une année et une filière dans le menu à gauche pour commencer.")
+if not st.session_state.annee_academique or not st.session_state.selected_annee or not st.session_state.selected_filiere:
+    st.info("👈 Dans le menu à gauche : ouvrez une année académique, puis une année, puis choisissez une filière.")
     st.stop()
 
+ANNEE_ACADEMIQUE = st.session_state.annee_academique
 ANNEE = st.session_state.selected_annee
 FILIERE = st.session_state.selected_filiere
 CLE = cle_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
