@@ -78,14 +78,6 @@ def cle_contexte(annee_academique, annee, filiere):
     return re.sub(r"[^A-Za-z0-9_]", "_", brut)
 
 
-def charger_annees_academiques():
-    return load_state("liste_annees_academiques", [])
-
-
-def sauvegarder_annees_academiques(liste):
-    save_state("liste_annees_academiques", liste)
-
-
 def contexte_par_defaut():
     return {
         "reference_df": pd.DataFrame({"Nom et Prénom": [""] * MAX_ROWS, "Matricule": [""] * MAX_ROWS}),
@@ -429,129 +421,55 @@ def afficher_entete_contexte(annee_academique, annee, filiere):
 # ============================================================
 st.sidebar.title("🎓 Navigation")
 
-if "annee_academique" not in st.session_state:
-    st.session_state.annee_academique = None
+# ---------- ANNÉE ACADÉMIQUE : une seule valeur en cours, on renseigne juste l'année ----------
 if "selected_annee" not in st.session_state:
     st.session_state.selected_annee = None
 if "selected_filiere" not in st.session_state:
     st.session_state.selected_filiere = None
+if "annee_academique_debut" not in st.session_state:
+    st.session_state.annee_academique_debut = load_state("annee_academique_debut", 2025)
 
-liste_annees_academiques = charger_annees_academiques()
-
-if not liste_annees_academiques:
-    st.sidebar.info("Aucune année académique. Créez-en une ci-dessous avec ➕.")
-
-if "confirmer_suppr_aa" not in st.session_state:
-    st.session_state.confirmer_suppr_aa = None
-
-for aa in liste_annees_academiques:
-    aa_ouverte = (st.session_state.annee_academique == aa)
-    col_toggle, col_del = st.sidebar.columns([5, 1])
-    with col_toggle:
-        if st.button(("📂 " if aa_ouverte else "📁 ") + aa, key=f"toggle_aa_{aa}", use_container_width=True):
-            if aa_ouverte:
-                st.session_state.annee_academique = None
-            else:
-                st.session_state.annee_academique = aa
-                st.session_state.selected_annee = None
-                st.session_state.selected_filiere = None
-            st.rerun()
-    with col_del:
-        if st.button("🗑️", key=f"del_aa_{aa}", help="Retirer cette année académique de la liste"):
-            st.session_state.confirmer_suppr_aa = aa
-            st.rerun()
-
-    if st.session_state.confirmer_suppr_aa == aa:
-        st.sidebar.warning(f"Retirer **{aa}** de la liste ? Les données restent enregistrées : "
-                            f"si vous recréez une année académique avec le même nom plus tard, "
-                            f"tout réapparaîtra tel quel.")
-        col_oui, col_non = st.sidebar.columns(2)
-        with col_oui:
-            if st.button("✅ Confirmer", key=f"confirm_del_{aa}", use_container_width=True):
-                liste_annees_academiques.remove(aa)
-                sauvegarder_annees_academiques(liste_annees_academiques)
-                if st.session_state.annee_academique == aa:
-                    st.session_state.annee_academique = None
-                    st.session_state.selected_annee = None
-                    st.session_state.selected_filiere = None
-                st.session_state.confirmer_suppr_aa = None
-                st.rerun()
-        with col_non:
-            if st.button("❌ Annuler", key=f"cancel_del_{aa}", use_container_width=True):
-                st.session_state.confirmer_suppr_aa = None
-                st.rerun()
-
-    if aa_ouverte:
-        for annee in CONTEXT_TREE:
-            annee_ouverte = (st.session_state.selected_annee == annee)
-            if st.sidebar.button(
-                ("　　📂 " if annee_ouverte else "　　📁 ") + annee,
-                key=f"toggle_annee_{aa}_{annee}", use_container_width=True,
-            ):
-                if annee_ouverte:
-                    st.session_state.selected_annee = None
-                    st.session_state.selected_filiere = None
-                else:
-                    st.session_state.selected_annee = annee
-                    st.session_state.selected_filiere = None
-                st.rerun()
-
-            if annee_ouverte:
-                for filiere in CONTEXT_TREE[annee]:
-                    est_actif = (st.session_state.selected_filiere == filiere)
-                    if st.sidebar.button(
-                        ("　　　　✅ " if est_actif else "　　　　　") + filiere,
-                        key=f"nav_{aa}_{annee}_{filiere}", use_container_width=True,
-                    ):
-                        st.session_state.selected_filiere = filiere
-                        st.rerun()
-
-def suggestion_prochaine_annee(liste):
-    """Calcule l'année de début suivante à partir de la liste réelle déjà créée."""
-    debuts = []
-    for aa in liste:
-        try:
-            debuts.append(int(aa.split("-")[0]))
-        except (ValueError, IndexError):
-            pass
-    return max(debuts) + 1 if debuts else 2025
-
+debut = st.sidebar.number_input(
+    "📅 Année académique (année de début)",
+    min_value=2000, max_value=2100, step=1,
+    key="annee_academique_debut",
+)
+save_state("annee_academique_debut", int(debut))
+ANNEE_ACADEMIQUE = f"{int(debut)}-{int(debut) + 1}"
+st.sidebar.caption(f"➡️ Année académique en cours : **{ANNEE_ACADEMIQUE}**")
 
 st.sidebar.divider()
-with st.sidebar.expander("➕ Créer une année", expanded=True):
-    # Important : on ne modifie jamais st.session_state["aa_debut"] après la création
-    # du widget dans le même passage du script (Streamlit l'interdit). On utilise donc
-    # un indicateur temporaire, consommé ICI, avant l'appel à st.number_input ci-dessous.
-    if "aa_debut_a_appliquer" in st.session_state:
-        st.session_state["aa_debut"] = st.session_state.pop("aa_debut_a_appliquer")
-    if "aa_debut" not in st.session_state:
-        st.session_state["aa_debut"] = suggestion_prochaine_annee(liste_annees_academiques)
 
-    debut = st.number_input("Année de début", min_value=2000, max_value=2100, step=1, key="aa_debut")
-    fin = int(debut) + 1
-    nouvelle_aa = f"{int(debut)}-{fin}"
-    st.caption(f"➡️ Année académique : **{nouvelle_aa}**")
-    if nouvelle_aa in liste_annees_academiques:
-        st.caption("ℹ️ Cette année académique existe déjà dans la liste ci-dessus.")
-    if st.button("✅ Valider", type="primary", key="valider_aa", use_container_width=True):
-        if nouvelle_aa not in liste_annees_academiques:
-            liste_annees_academiques.append(nouvelle_aa)
-            sauvegarder_annees_academiques(liste_annees_academiques)
-        st.session_state.annee_academique = nouvelle_aa
-        st.session_state.selected_annee = None
-        st.session_state.selected_filiere = None
-        # On ne touche pas "aa_debut" ici (déjà instancié) : on programme le changement
-        # pour le PROCHAIN passage du script, via l'indicateur temporaire ci-dessus.
-        st.session_state["aa_debut_a_appliquer"] = suggestion_prochaine_annee(liste_annees_academiques)
+for annee in CONTEXT_TREE:
+    annee_ouverte = (st.session_state.selected_annee == annee)
+    if st.sidebar.button(
+        ("📂 " if annee_ouverte else "📁 ") + annee,
+        key=f"toggle_annee_{annee}", use_container_width=True,
+    ):
+        if annee_ouverte:
+            st.session_state.selected_annee = None
+            st.session_state.selected_filiere = None
+        else:
+            st.session_state.selected_annee = annee
+            st.session_state.selected_filiere = None
         st.rerun()
+
+    if annee_ouverte:
+        for filiere in CONTEXT_TREE[annee]:
+            est_actif = (st.session_state.selected_filiere == filiere)
+            if st.sidebar.button(
+                ("　　✅ " if est_actif else "　　　") + filiere,
+                key=f"nav_{annee}_{filiere}", use_container_width=True,
+            ):
+                st.session_state.selected_filiere = filiere
+                st.rerun()
 
 st.title("🧮 Calculatrice de Bulletins")
 
-if not st.session_state.annee_academique or not st.session_state.selected_annee or not st.session_state.selected_filiere:
-    st.info("👈 Dans le menu à gauche : ouvrez une année académique, puis une année, puis choisissez une filière.")
+if not st.session_state.selected_annee or not st.session_state.selected_filiere:
+    st.info("👈 Dans le menu à gauche : choisissez une année, puis une filière.")
     st.stop()
 
-ANNEE_ACADEMIQUE = st.session_state.annee_academique
 ANNEE = st.session_state.selected_annee
 FILIERE = st.session_state.selected_filiere
 CLE = cle_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
