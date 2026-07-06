@@ -90,6 +90,16 @@ def contexte_par_defaut():
     }
 
 
+def enregistrer_dans_registre(annee_academique, annee, filiere):
+    """Garde trace de toutes les combinaisons (année académique, année, filière) déjà
+    ouvertes, pour pouvoir les retrouver plus tard dans l'onglet Archives."""
+    registre = load_state("registre_structure", {})
+    registre.setdefault(annee_academique, {}).setdefault(annee, [])
+    if filiere not in registre[annee_academique][annee]:
+        registre[annee_academique][annee].append(filiere)
+    save_state("registre_structure", registre)
+
+
 def charger_contexte(cle):
     """Charge (depuis le disque si besoin) les données de la filière sélectionnée, une seule fois."""
     if "ctx_store" not in st.session_state:
@@ -163,7 +173,8 @@ def bandeau_annuler(ctx, cle):
 
 def bouton_impression(titre, sous_titre, lignes_html, moyenne_html, cle_widget):
     """Bouton qui ouvre la boîte de dialogue d'impression du navigateur (choix d'imprimante)
-    avec uniquement le contenu du bulletin, proprement mis en page."""
+    avec uniquement le contenu du bulletin, proprement mis en page. Utilise un iframe caché
+    (plutôt qu'une fenêtre popup, souvent bloquée silencieusement par le navigateur)."""
     contenu = f"""
     <html><head><meta charset="utf-8"><title>{html_lib.escape(titre)}</title>
     <style>
@@ -181,7 +192,6 @@ def bouton_impression(titre, sous_titre, lignes_html, moyenne_html, cle_widget):
       <table><thead><tr><th>Matière</th><th>Note /20</th></tr></thead>
       <tbody>{lignes_html}</tbody></table>
       <div class="moyenne">{moyenne_html}</div>
-      <script>window.onload = function() {{ window.print(); }};</script>
     </body></html>
     """
     contenu_js = json.dumps(contenu)
@@ -190,11 +200,18 @@ def bouton_impression(titre, sous_titre, lignes_html, moyenne_html, cle_widget):
       padding:10px 18px;border-radius:6px;cursor:pointer;font-size:14px;">
       🖨️ Imprimer ce bulletin
     </button>
+    <iframe id="printFrame_{cle_widget}" style="display:none;"></iframe>
     <script>
       document.getElementById("btnPrint_{cle_widget}").addEventListener("click", function() {{
-        const w = window.open("", "_blank");
-        w.document.write({contenu_js});
-        w.document.close();
+        const iframe = document.getElementById("printFrame_{cle_widget}");
+        const doc = iframe.contentWindow.document;
+        doc.open();
+        doc.write({contenu_js});
+        doc.close();
+        setTimeout(function() {{
+          iframe.contentWindow.focus();
+          iframe.contentWindow.print();
+        }}, 200);
       }});
     </script>
     """
@@ -210,19 +227,24 @@ def split_nom_prenom(nom_complet):
 
 
 # ---------- TABLEAU HTML SÉLECTIONNABLE (copier-coller façon Excel) ----------
-def tableau_selectionnable(df, height=460, colonnes_figees=0, cle_widget="tbl", largeur_matieres=90):
+def tableau_selectionnable(df, height=460, colonnes_figees=0, cle_widget="tbl", largeur_matieres=160):
     """Affiche un tableau HTML où l'on peut cliquer-glisser pour sélectionner une plage
     de cellules (comme Excel), avec défilement automatique en bordure, copie via Ctrl+C
     ou clic droit → Copier. Les `colonnes_figees` premières colonnes restent visibles
     lors du défilement horizontal (comme 'Figer les volets' dans Excel). Les colonnes
-    suivantes (matières) sont volontairement étroites, avec retour à la ligne dans l'en-tête,
-    pour éviter un tableau trop large."""
+    suivantes (matières) gardent leur texte sur une seule ligne (pas de découpe lettre
+    par lettre) ; on utilise le défilement horizontal si le tableau est large."""
     cols = list(df.columns)
 
     largeurs = [max(len(str(c)), *(len(str(v)) for v in df[c].astype(str))) * 8 + 24 if len(df) else 120
                 for c in cols]
-    # Les colonnes figées gardent leur largeur naturelle ; les autres sont bornées et repliables
-    largeurs = [largeurs[c] if c < colonnes_figees else min(largeurs[c], largeur_matieres) for c in range(len(cols))]
+    # Les colonnes matières ont au moins la largeur de leur propre en-tête (texte lisible,
+    # non tronqué), avec un plafond raisonnable pour éviter des colonnes démesurées.
+    largeurs = [
+        largeurs[c] if c < colonnes_figees
+        else max(min(largeurs[c], largeur_matieres), len(str(cols[c])) * 8 + 24)
+        for c in range(len(cols))
+    ]
     offsets = [0]
     for w in largeurs[:-1]:
         offsets.append(offsets[-1] + w)
@@ -231,8 +253,7 @@ def tableau_selectionnable(df, height=460, colonnes_figees=0, cle_widget="tbl", 
         if c < colonnes_figees:
             return (f'position: sticky; left: {offsets[c]}px; z-index: 3; '
                      f'min-width: {largeurs[c]}px; box-shadow: 2px 0 4px rgba(0,0,0,0.4); white-space: nowrap;')
-        return (f'white-space: normal; word-break: break-word; max-width: {largeur_matieres}px; '
-                 f'width: {largeur_matieres}px;')
+        return f'white-space: nowrap; min-width: {largeurs[c]}px;'
 
     header_html = "".join(
         f'<th style="{style_figee(c)} {"z-index:4;" if c < colonnes_figees else ""}">{html_lib.escape(str(col))}</th>'
@@ -417,9 +438,9 @@ def afficher_entete_contexte(annee_academique, annee, filiere):
 
 
 # ============================================================
-# NAVIGATION : Année académique + Année + Filière (dans l'onglet 1)
+# BARRE LATÉRALE : Année académique + arbre Année → Filière
 # ============================================================
-st.title("🧮 Calculatrice de Bulletins")
+st.sidebar.title("🎓 Navigation")
 
 if "selected_annee" not in st.session_state:
     st.session_state.selected_annee = load_state("selected_annee", None)
@@ -428,75 +449,73 @@ if "selected_filiere" not in st.session_state:
 if "annee_academique_debut" not in st.session_state:
     st.session_state.annee_academique_debut = load_state("annee_academique_debut", 2025)
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+debut = st.sidebar.number_input(
+    "📅 Année de début (ex: 2026)",
+    min_value=2000, max_value=2100, step=1,
+    key="annee_academique_debut",
+    help="Entrez uniquement l'année de début, sans tiret. "
+         "L'année de fin est calculée automatiquement.",
+)
+save_state("annee_academique_debut", int(debut))
+ANNEE_ACADEMIQUE = f"{int(debut)}-{int(debut) + 1}"
+st.sidebar.caption(f"➡️ Année académique : **{ANNEE_ACADEMIQUE}**")
+
+st.sidebar.divider()
+
+for annee in CONTEXT_TREE:
+    annee_ouverte = (st.session_state.selected_annee == annee)
+    if st.sidebar.button(
+        ("📂 " if annee_ouverte else "📁 ") + annee,
+        key=f"toggle_annee_{annee}", use_container_width=True,
+    ):
+        if annee_ouverte:
+            st.session_state.selected_annee = None
+            st.session_state.selected_filiere = None
+        else:
+            st.session_state.selected_annee = annee
+            st.session_state.selected_filiere = None
+        save_state("selected_annee", st.session_state.selected_annee)
+        save_state("selected_filiere", st.session_state.selected_filiere)
+        st.rerun()
+
+    if annee_ouverte:
+        for filiere in CONTEXT_TREE[annee]:
+            est_actif = (st.session_state.selected_filiere == filiere)
+            if st.sidebar.button(
+                ("　　✅ " if est_actif else "　　　") + filiere,
+                key=f"nav_{annee}_{filiere}", use_container_width=True,
+            ):
+                st.session_state.selected_filiere = filiere
+                save_state("selected_filiere", filiere)
+                st.rerun()
+
+st.title("🧮 Calculatrice de Bulletins")
+
+if not st.session_state.selected_annee or not st.session_state.selected_filiere:
+    st.info("👈 Dans le menu à gauche : choisissez une année, puis une filière.")
+    st.stop()
+
+ANNEE = st.session_state.selected_annee
+FILIERE = st.session_state.selected_filiere
+CLE = cle_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
+ctx = charger_contexte(CLE)
+enregistrer_dans_registre(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
+
+st.caption(f"📂 Espace de travail : **{ANNEE_ACADEMIQUE} · {ANNEE} — {FILIERE}** "
+           f"(les données sont indépendantes pour chaque filière)")
+
+bandeau_annuler(ctx, CLE)
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📋 1. Liste de référence", "✍️ 2. Saisie des notes",
     "📑 3. Récapitulatif", "⚖️ 4. Liste des décisions", "🎓 5. Bulletin",
+    "🗄️ 6. Archives",
 ])
 
 # ============================================================
 # ONGLET 1 : LISTE DE RÉFÉRENCE
 # ============================================================
 with tab1:
-    col_aa, col_annee, col_filiere = st.columns([1, 1, 1])
-
-    with col_aa:
-        debut = st.number_input(
-            "📅 Année académique (début)",
-            min_value=2000, max_value=2100, step=1,
-            key="annee_academique_debut",
-        )
-        save_state("annee_academique_debut", int(debut))
-    ANNEE_ACADEMIQUE = f"{int(debut)}-{int(debut) + 1}"
-
-    with col_annee:
-        liste_annees = list(CONTEXT_TREE.keys())
-        index_annee = liste_annees.index(st.session_state.selected_annee) if st.session_state.selected_annee in liste_annees else None
-        annee_choisie = st.selectbox(
-            "🗓️ Année", options=liste_annees, index=index_annee,
-            placeholder="Choisir une année...", key="select_annee",
-        )
-        if annee_choisie != st.session_state.selected_annee:
-            st.session_state.selected_annee = annee_choisie
-            st.session_state.selected_filiere = None
-            save_state("selected_annee", annee_choisie)
-            save_state("selected_filiere", None)
-            st.rerun()
-
-    with col_filiere:
-        if st.session_state.selected_annee:
-            liste_filieres = CONTEXT_TREE[st.session_state.selected_annee]
-            index_filiere = (
-                liste_filieres.index(st.session_state.selected_filiere)
-                if st.session_state.selected_filiere in liste_filieres else None
-            )
-            filiere_choisie = st.selectbox(
-                "🎓 Filière", options=liste_filieres, index=index_filiere,
-                placeholder="Choisir une filière...", key="select_filiere",
-            )
-            if filiere_choisie != st.session_state.selected_filiere:
-                st.session_state.selected_filiere = filiere_choisie
-                save_state("selected_filiere", filiere_choisie)
-                st.rerun()
-        else:
-            st.selectbox(
-                "🎓 Filière", options=[], placeholder="Choisissez d'abord une année",
-                key="select_filiere_disabled", disabled=True,
-            )
-
-    if not st.session_state.selected_annee or not st.session_state.selected_filiere:
-        st.info("👆 Choisissez une année, puis une filière pour commencer.")
-        st.stop()
-
-    ANNEE = st.session_state.selected_annee
-    FILIERE = st.session_state.selected_filiere
-    CLE = cle_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
-    ctx = charger_contexte(CLE)
-
-    st.caption(f"📂 Espace de travail : **{ANNEE} — {FILIERE}** "
-               f"(les données sont indépendantes pour chaque filière)")
-
-    bandeau_annuler(ctx, CLE)
-
     st.subheader(f"Liste de référence — {ANNEE} / {FILIERE}")
 
     nb_notes_existantes = sum(len(v) for v in ctx["grades"].values())
@@ -938,3 +957,86 @@ with tab5:
                         f"Bulletin — {nom} {prenom}", sous_titre, lignes_html_impression, moyenne_html,
                         cle_widget=f"print_{CLE}_{idx_choisi}",
                     )
+
+
+# ============================================================
+# ONGLET 6 : ARCHIVES (consultation en lecture seule, par année académique)
+# ============================================================
+with tab6:
+    st.subheader("🗄️ Archives par année académique")
+    st.caption("Retrouvez ici toutes les années académiques déjà utilisées. "
+               "Cliquez sur un dossier pour l'ouvrir, jusqu'à la filière souhaitée. "
+               "Consultation uniquement : aucune modification possible ici.")
+
+    if "archive_aa" not in st.session_state:
+        st.session_state.archive_aa = None
+    if "archive_annee" not in st.session_state:
+        st.session_state.archive_annee = None
+    if "archive_filiere" not in st.session_state:
+        st.session_state.archive_filiere = None
+
+    registre = load_state("registre_structure", {})
+
+    if not registre:
+        st.info("Aucune donnée enregistrée pour l'instant. Dès que vous travaillez dans "
+                "une filière, elle apparaîtra automatiquement ici.")
+    else:
+        for aa in sorted(registre.keys(), reverse=True):
+            aa_ouverte = (st.session_state.archive_aa == aa)
+            if st.button(("📂 " if aa_ouverte else "📁 ") + aa, key=f"arch_aa_{aa}", use_container_width=True):
+                if aa_ouverte:
+                    st.session_state.archive_aa = None
+                else:
+                    st.session_state.archive_aa = aa
+                    st.session_state.archive_annee = None
+                    st.session_state.archive_filiere = None
+                st.rerun()
+
+            if aa_ouverte:
+                for annee in registre[aa]:
+                    annee_ouverte = (st.session_state.archive_annee == annee)
+                    if st.button(
+                        ("　📂 " if annee_ouverte else "　📁 ") + annee,
+                        key=f"arch_annee_{aa}_{annee}", use_container_width=True,
+                    ):
+                        if annee_ouverte:
+                            st.session_state.archive_annee = None
+                        else:
+                            st.session_state.archive_annee = annee
+                            st.session_state.archive_filiere = None
+                        st.rerun()
+
+                    if annee_ouverte:
+                        for filiere in registre[aa][annee]:
+                            est_actif = (st.session_state.archive_filiere == filiere)
+                            if st.button(
+                                ("　　✅ " if est_actif else "　　　") + filiere,
+                                key=f"arch_fil_{aa}_{annee}_{filiere}", use_container_width=True,
+                            ):
+                                st.session_state.archive_filiere = filiere
+                                st.rerun()
+
+        if st.session_state.archive_aa and st.session_state.archive_annee and st.session_state.archive_filiere:
+            aa_a = st.session_state.archive_aa
+            annee_a = st.session_state.archive_annee
+            filiere_a = st.session_state.archive_filiere
+            cle_a = cle_contexte(aa_a, annee_a, filiere_a)
+            ctx_a = charger_contexte(cle_a)
+
+            st.divider()
+            st.markdown(f"### 📖 {aa_a} — {annee_a} / {filiere_a}")
+
+            resultat_a, matieres_a, valid_ref_a = construire_resultat_df(ctx_a)
+
+            if valid_ref_a.empty:
+                st.caption("Aucun étudiant enregistré pour cette filière, cette année-là.")
+            else:
+                st.caption(f"👥 {len(valid_ref_a)} étudiant(s) — "
+                           f"{len(matieres_a)} matière(s) : {', '.join(matieres_a) if matieres_a else 'aucune'}.")
+                tableau_selectionnable(resultat_a, height=420, colonnes_figees=4, cle_widget=f"archive_{cle_a}")
+
+                csv_dl = resultat_a.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "⬇️ Télécharger en CSV", csv_dl, f"archive_{aa_a}_{annee_a}_{filiere_a}.csv", "text/csv",
+                    key=f"dl_archive_{cle_a}",
+                )
