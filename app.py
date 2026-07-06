@@ -67,6 +67,13 @@ if "reference_df" not in st.session_state:
             {"Nom et Prénom": [""] * MAX_ROWS, "Matricule": [""] * MAX_ROWS}
         )
 
+if "matieres_df" not in st.session_state:
+    saved_mat = load_state("matieres_df", None)
+    if saved_mat:
+        st.session_state.matieres_df = pd.DataFrame(saved_mat)
+    else:
+        st.session_state.matieres_df = pd.DataFrame({"Matière": [""] * 50})
+
 if "grades" not in st.session_state:
     # structure : { "index_etudiant": { "Matière": note, ... }, ... }
     st.session_state.grades = load_state("grades", {})
@@ -74,11 +81,20 @@ if "grades" not in st.session_state:
 if "matieres" not in st.session_state:
     st.session_state.matieres = load_state("matieres", [])  # liste des matières déjà utilisées
 
+if "annee_etudes" not in st.session_state:
+    st.session_state.annee_etudes = load_state("annee_etudes", "")
+
+if "filiere" not in st.session_state:
+    st.session_state.filiere = load_state("filiere", "")
+
 
 def persist_all():
     save_state("reference_df", st.session_state.reference_df.to_dict(orient="list"))
     save_state("grades", st.session_state.grades)
     save_state("matieres", st.session_state.matieres)
+    save_state("matieres_df", st.session_state.matieres_df.to_dict(orient="list"))
+    save_state("annee_etudes", st.session_state.annee_etudes)
+    save_state("filiere", st.session_state.filiere)
 
 
 def split_nom_prenom(nom_complet):
@@ -267,6 +283,17 @@ def construire_resultat_df():
     return pd.DataFrame(rows), matieres, valid_ref
 
 
+def afficher_entete_contexte():
+    """Affiche l'année d'études et la filière en en-tête, si renseignées."""
+    if st.session_state.annee_etudes or st.session_state.filiere:
+        morceaux = []
+        if st.session_state.annee_etudes:
+            morceaux.append(f"🗓️ **Année d'études :** {st.session_state.annee_etudes}")
+        if st.session_state.filiere:
+            morceaux.append(f"🎓 **Filière :** {st.session_state.filiere}")
+        st.info(" &nbsp;|&nbsp; ".join(morceaux))
+
+
 st.title("🧮 Calculatrice de Bulletins")
 st.caption("Liste de référence → saisie désordonnée des notes → résultat toujours dans l'ordre officiel")
 
@@ -281,14 +308,34 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     st.subheader("Liste de référence (ordre officiel de la scolarité)")
 
-    if st.button("🗑️ Effacer la liste (et le résultat final)", type="secondary"):
+    col_a, col_b = st.columns(2)
+    with col_a:
+        nouvelle_annee = st.text_input("🗓️ Année d'études", value=st.session_state.annee_etudes,
+                                        placeholder="Ex: 2025-2026", key="annee_input")
+    with col_b:
+        nouvelle_filiere = st.text_input("🎓 Filière", value=st.session_state.filiere,
+                                          placeholder="Ex: Licence 2 Informatique", key="filiere_input")
+    if nouvelle_annee != st.session_state.annee_etudes or nouvelle_filiere != st.session_state.filiere:
+        st.session_state.annee_etudes = nouvelle_annee
+        st.session_state.filiere = nouvelle_filiere
+        persist_all()
+
+    st.divider()
+
+    nb_notes_existantes = sum(len(v) for v in st.session_state.grades.values())
+    if st.button("🗑️ Effacer la liste de référence (garde les résultats)", type="secondary"):
         st.session_state.reference_df = pd.DataFrame(
             {"Nom et Prénom": [""] * MAX_ROWS, "Matricule": [""] * MAX_ROWS}
         )
-        st.session_state.grades = {}  # effacement en cascade du résultat
         persist_all()
-        st.success("Liste et résultats effacés. Vous pouvez coller une nouvelle liste.")
+        st.success("Liste de référence effacée. Les notes déjà saisies sont conservées.")
         st.rerun()
+    if nb_notes_existantes > 0:
+        st.caption(
+            "⚠️ Des notes existent déjà. Si vous collez une liste totalement différente (nouvelle année), "
+            "pensez à aussi effacer les résultats dans l'onglet '📊 3. Résultat final', car les anciennes "
+            "notes resteraient associées aux nouvelles positions de la liste."
+        )
 
     nb_etudiants = (st.session_state.reference_df["Nom et Prénom"].astype(str).str.strip() != "").sum()
     st.caption(f"👥 {nb_etudiants} étudiant(s) actuellement reconnu(s) dans la liste.")
@@ -315,18 +362,51 @@ with tab1:
         persist_all()
         st.rerun()
 
+    with st.expander("📋 Vue sélectionnable (cliquez-glissez ou clic droit → Copier)"):
+        vue_ref = st.session_state.reference_df[
+            st.session_state.reference_df["Nom et Prénom"].astype(str).str.strip() != ""
+        ].reset_index(drop=True)
+        if vue_ref.empty:
+            st.caption("Aucune donnée à afficher pour l'instant.")
+        else:
+            tableau_selectionnable(vue_ref, height=300)
+
     st.divider()
-    st.write("**📚 Matières actuellement enregistrées :**")
-    if st.session_state.matieres:
-        st.write(", ".join(st.session_state.matieres))
-    else:
-        st.caption("Aucune matière saisie pour l'instant (à faire dans l'onglet '✍️ 2. Saisie des notes').")
+    st.write("**📚 Liste des matières** (collez-en plusieurs à la fois, une par ligne)")
+    edited_matieres_df = st.data_editor(
+        st.session_state.matieres_df,
+        num_rows="fixed",
+        use_container_width=True,
+        height=220,
+        key="matieres_editor",
+    )
+    if not edited_matieres_df.equals(st.session_state.matieres_df):
+        st.session_state.matieres_df = edited_matieres_df
+        nouvelles_matieres = [
+            m.strip() for m in edited_matieres_df["Matière"].astype(str).tolist() if m.strip()
+        ]
+        # on garde l'ordre d'apparition, sans doublons
+        vues = []
+        for m in nouvelles_matieres:
+            if m not in vues:
+                vues.append(m)
+        st.session_state.matieres = vues
+        persist_all()
+        st.rerun()
+
+    with st.expander("📋 Vue sélectionnable des matières (cliquez-glissez ou clic droit → Copier)"):
+        vue_mat = pd.DataFrame({"Matière": st.session_state.matieres})
+        if vue_mat.empty:
+            st.caption("Aucune matière à afficher pour l'instant.")
+        else:
+            tableau_selectionnable(vue_mat, height=220)
 
 # ============================================================
 # ONGLET 2 : SAISIE DES NOTES (recherche par nom, ordre libre)
 # ============================================================
 with tab2:
     st.subheader("Saisie des notes (dans n'importe quel ordre)")
+    afficher_entete_contexte()
 
     ref = st.session_state.reference_df
     valid_mask = ref["Nom et Prénom"].astype(str).str.strip() != ""
@@ -390,38 +470,26 @@ with tab2:
                     if matiere_active not in st.session_state.matieres:
                         st.session_state.matieres.append(matiere_active)
                         st.session_state.matiere_courante = matiere_active
+                        # on garde aussi la table collable des matières synchronisée
+                        colonne = st.session_state.matieres_df["Matière"].astype(str).tolist()
+                        premiere_vide = next((i for i, v in enumerate(colonne) if not v.strip()), None)
+                        if premiere_vide is not None:
+                            st.session_state.matieres_df.loc[premiere_vide, "Matière"] = matiere_active
+                        else:
+                            st.session_state.matieres_df = pd.concat(
+                                [st.session_state.matieres_df, pd.DataFrame({"Matière": [matiere_active]})],
+                                ignore_index=True,
+                            )
                     persist_all()
-                    st.success(f"Note enregistrée pour {options[chosen_idx]} en {matiere_active}.")
-
-        st.divider()
-        st.write("**Notes saisies jusqu'à présent :**")
-        lignes_saisie = []
-        for idx_str, matieres_notes in st.session_state.grades.items():
-            idx = int(idx_str)
-            if idx in options:
-                for mat, note in matieres_notes.items():
-                    lignes_saisie.append((idx_str, mat, options[idx], note))
-
-        if lignes_saisie:
-            for idx_str, mat, nom_complet, note in lignes_saisie:
-                c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
-                c1.write(nom_complet)
-                c2.write(mat)
-                c3.write(note)
-                if c4.button("🗑️", key=f"del_note_{idx_str}_{mat}"):
-                    del st.session_state.grades[idx_str][mat]
-                    if not st.session_state.grades[idx_str]:
-                        del st.session_state.grades[idx_str]
-                    persist_all()
-                    st.rerun()
-        else:
-            st.caption("Aucune note saisie pour l'instant.")
+                    st.success(f"Note enregistrée pour {options[chosen_idx]} en {matiere_active}. "
+                               f"Résultat final et récapitulatif mis à jour.")
 
 # ============================================================
 # ONGLET 3 : RÉSULTAT FINAL (toujours dans l'ordre de la liste)
 # ============================================================
 with tab3:
     st.subheader("Résultat final — dans l'ordre officiel de la liste")
+    afficher_entete_contexte()
 
     resultat_df, matieres, valid_ref = construire_resultat_df()
 
@@ -435,9 +503,8 @@ with tab3:
         with col2:
             if st.button("🗑️ Effacer les notes", type="secondary"):
                 st.session_state.grades = {}
-                st.session_state.matieres = []
                 persist_all()
-                st.success("Notes effacées. La liste de référence est conservée.")
+                st.success("Notes effacées. La liste de référence et les matières sont conservées.")
                 st.rerun()
 
         nb_notes = sum(1 for idx in valid_ref.index if st.session_state.grades.get(str(idx)))
@@ -452,6 +519,7 @@ with tab3:
 # ============================================================
 with tab4:
     st.subheader("Récapitulatif — étudiants en lignes, matières en colonnes")
+    afficher_entete_contexte()
 
     resultat_df, matieres, valid_ref = construire_resultat_df()
 
@@ -462,15 +530,28 @@ with tab4:
     else:
         st.dataframe(resultat_df, use_container_width=True, hide_index=True, height=460)
 
+        # En-tête Année/Filière inclus dans les fichiers exportés
+        entete_lignes = []
+        if st.session_state.annee_etudes:
+            entete_lignes.append(f"Année d'études : {st.session_state.annee_etudes}")
+        if st.session_state.filiere:
+            entete_lignes.append(f"Filière : {st.session_state.filiere}")
+        entete_texte = " | ".join(entete_lignes)
+
         col1, col2 = st.columns([1, 1])
         with col1:
-            csv = resultat_df.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Télécharger en CSV", csv, "recapitulatif.csv", "text/csv", key="dl_recap_csv")
+            csv_contenu = (entete_texte + "\n" if entete_texte else "") + resultat_df.to_csv(index=False)
+            st.download_button("⬇️ Télécharger en CSV", csv_contenu.encode("utf-8"),
+                                "recapitulatif.csv", "text/csv", key="dl_recap_csv")
         with col2:
             from io import BytesIO
             buffer = BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                resultat_df.to_excel(writer, index=False, sheet_name="Récapitulatif")
+                start_row = 0
+                if entete_texte:
+                    pd.DataFrame({entete_texte: []}).to_excel(writer, index=False, sheet_name="Récapitulatif", startrow=0)
+                    start_row = 2
+                resultat_df.to_excel(writer, index=False, sheet_name="Récapitulatif", startrow=start_row)
             st.download_button(
                 "⬇️ Télécharger en Excel", buffer.getvalue(), "recapitulatif.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_recap_xlsx",
