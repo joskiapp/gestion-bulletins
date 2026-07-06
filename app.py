@@ -456,12 +456,22 @@ with tab2:
                     key="search_student",
                 )
             with col2:
-                note_val = st.number_input("Note /20", min_value=0.0, max_value=20.0, step=0.25, key="note_input")
+                note_str = st.text_input("Note /20", value="", placeholder="Ex: 14.5", key="note_input")
 
             submitted = st.form_submit_button("✅ Enregistrer (ou appuyez sur Entrée)", type="primary")
             if submitted:
+                note_str_clean = note_str.strip().replace(",", ".")
+                try:
+                    note_val = float(note_str_clean) if note_str_clean else None
+                except ValueError:
+                    note_val = None
+
                 if chosen_idx is None or not matiere_active:
                     st.warning("Choisissez une matière et un étudiant avant de valider.")
+                elif note_val is None:
+                    st.warning("Note invalide : saisissez un nombre (ex: 14 ou 14.5).")
+                elif not (0 <= note_val <= 20):
+                    st.warning("La note doit être comprise entre 0 et 20.")
                 else:
                     idx_str = str(chosen_idx)
                     if idx_str not in st.session_state.grades:
