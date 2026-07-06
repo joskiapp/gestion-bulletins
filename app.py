@@ -437,6 +437,26 @@ with tab1:
 
     st.divider()
     st.write("**📚 Liste des matières** (collez-en plusieurs à la fois, une par ligne)")
+    st.caption(
+        "ℹ️ La composition des matières peut changer d'une évaluation à l'autre. "
+        "Assurez-vous d'abord que la **liste des étudiants** ci-dessus est bien complète et dans le bon ordre, "
+        "puis effacez la liste des matières ici pour la remplacer par une nouvelle."
+    )
+
+    nb_notes_liees = sum(len(v) for v in ctx["grades"].values())
+    if st.button("🗑️ Effacer la liste des matières", type="secondary", key=f"clear_mat_{CLE}"):
+        ctx["matieres_df"] = pd.DataFrame({"Matière": [""] * 50})
+        ctx["matieres"] = []
+        ctx["matiere_courante"] = ""
+        ctx["grades"] = {}  # les notes étaient liées aux anciennes matières, elles n'ont plus de sens
+        persist_contexte(CLE, ctx)
+        st.success("Liste des matières (et notes associées) effacée. La liste des étudiants est conservée. "
+                   "Vous pouvez coller les nouvelles matières.")
+        st.rerun()
+    if nb_notes_liees > 0:
+        st.caption(f"⚠️ {nb_notes_liees} note(s) actuellement liée(s) aux matières existantes — "
+                   "elles seront effacées en même temps que la liste des matières.")
+
     edited_matieres_df = st.data_editor(
         ctx["matieres_df"], num_rows="fixed", use_container_width=True,
         height=215, key=f"matieres_editor_{CLE}",
@@ -555,6 +575,7 @@ with tab2:
                         persist_contexte(CLE, ctx)
                         st.success(f"Note enregistrée pour {options[chosen_idx]} en {matiere_active}. "
                                    f"Récapitulatif et bulletin mis à jour.")
+                        st.rerun()
 
         else:
             st.info(
