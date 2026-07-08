@@ -87,6 +87,7 @@ def contexte_par_defaut():
         "matiere_courante": "",
         "collage_notes_df": pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500}),
         "analyse_collage": None,
+        "rattrapage": {},
     }
 
 
@@ -115,6 +116,7 @@ def charger_contexte(cle):
             "matiere_courante": load_state(f"matiere_courante::{cle}", ""),
             "collage_notes_df": pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500}),
             "analyse_collage": None,
+            "rattrapage": load_state(f"rattrapage::{cle}", {}),
         }
     return st.session_state.ctx_store[cle]
 
@@ -125,6 +127,7 @@ def persist_contexte(cle, ctx):
     save_state(f"grades::{cle}", ctx["grades"])
     save_state(f"matieres::{cle}", ctx["matieres"])
     save_state(f"matiere_courante::{cle}", ctx["matiere_courante"])
+    save_state(f"rattrapage::{cle}", ctx["rattrapage"])
 
 
 # ---------- OUTILS DE CORRESPONDANCE DE NOMS ----------
@@ -438,29 +441,14 @@ def afficher_entete_contexte(annee_academique, annee, filiere):
 
 
 # ============================================================
-# BARRE LATÉRALE : Année académique + arbre Année → Filière
+# BARRE LATÉRALE : arbre Année → Filière
 # ============================================================
-st.sidebar.title("🎓 Navigation")
-
 if "selected_annee" not in st.session_state:
     st.session_state.selected_annee = load_state("selected_annee", None)
 if "selected_filiere" not in st.session_state:
     st.session_state.selected_filiere = load_state("selected_filiere", None)
 if "annee_academique_debut" not in st.session_state:
     st.session_state.annee_academique_debut = load_state("annee_academique_debut", 2025)
-
-debut = st.sidebar.number_input(
-    "📅 Année de début (ex: 2026)",
-    min_value=2000, max_value=2100, step=1,
-    key="annee_academique_debut",
-    help="Entrez uniquement l'année de début, sans tiret. "
-         "L'année de fin est calculée automatiquement.",
-)
-save_state("annee_academique_debut", int(debut))
-ANNEE_ACADEMIQUE = f"{int(debut)}-{int(debut) + 1}"
-st.sidebar.caption(f"➡️ Année académique : **{ANNEE_ACADEMIQUE}**")
-
-st.sidebar.divider()
 
 for annee in CONTEXT_TREE:
     annee_ouverte = (st.session_state.selected_annee == annee)
@@ -491,6 +479,19 @@ for annee in CONTEXT_TREE:
 
 st.title("🧮 Calculatrice de Bulletins")
 
+col_annee, _ = st.columns([1, 3])
+with col_annee:
+    debut = st.number_input(
+        "📅 Année de début (ex: 2026)",
+        min_value=2000, max_value=2100, step=1,
+        key="annee_academique_debut",
+        help="Entrez uniquement l'année de début, sans tiret. "
+             "L'année de fin est calculée automatiquement.",
+    )
+save_state("annee_academique_debut", int(debut))
+ANNEE_ACADEMIQUE = f"{int(debut)}-{int(debut) + 1}"
+st.caption(f"➡️ Année académique : **{ANNEE_ACADEMIQUE}**")
+
 if not st.session_state.selected_annee or not st.session_state.selected_filiere:
     st.info("👈 Dans le menu à gauche : choisissez une année, puis une filière.")
     st.stop()
@@ -506,10 +507,10 @@ st.caption(f"📂 Espace de travail : **{ANNEE_ACADEMIQUE} · {ANNEE} — {FILIE
 
 bandeau_annuler(ctx, CLE)
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📋 1. Liste de référence", "✍️ 2. Saisie des notes",
-    "📑 3. Récapitulatif", "⚖️ 4. Liste des décisions", "🎓 5. Bulletin",
-    "🗄️ 6. Archives",
+    "📑 3. Récapitulatif", "⚖️ 4. Liste des décisions", "🔁 5. Rattrapage",
+    "🎓 6. Bulletin", "🗄️ 7. Archives",
 ])
 
 # ============================================================
@@ -891,9 +892,106 @@ with tab4:
                                 f"non_valides_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_nonvalides_{CLE}")
 
 # ============================================================
-# ONGLET 5 : BULLETIN INDIVIDUEL
+# ONGLET 5 : RATTRAPAGE
 # ============================================================
 with tab5:
+    st.subheader("Rattrapage — étudiants n'ayant pas atteint la moyenne")
+    afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
+
+    resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
+
+    if valid_ref.empty:
+        st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
+    elif not matieres:
+        st.info("Aucune matière saisie pour l'instant. Ajoutez des notes dans l'onglet '✍️ 2. Saisie des notes'.")
+    else:
+        st.caption(
+            "Seuil de passage : **moyenne générale ≥ 12/20**. Les étudiants ayant une moyenne "
+            "strictement inférieure à 12 apparaissent ci-dessous, dans le même ordre que le classement "
+            "général (colonne Ordre)."
+        )
+
+        # On relie chaque ligne du résultat à son véritable index de référence (celui utilisé
+        # dans ctx["grades"]), car resultat_df est reconstruit avec un index 0..n par défaut.
+        resultat_rattr = resultat_df.copy()
+        resultat_rattr["_idx_ref"] = valid_ref.index.tolist()
+
+        rattrapage_df = resultat_rattr[
+            resultat_rattr["Moyenne"].notna() & (resultat_rattr["Moyenne"] < 12)
+        ].sort_values("Ordre").reset_index(drop=True)
+
+        if rattrapage_df.empty:
+            st.success("🎉 Aucun étudiant sous la moyenne : personne n'est concerné par le rattrapage.")
+        else:
+            st.caption(f"👥 {len(rattrapage_df)} étudiant(s) concerné(s) par le rattrapage.")
+
+            options_rattrapage = {}
+            for _, row in rattrapage_df.iterrows():
+                idx_ref = row["_idx_ref"]
+                matricule = valid_ref.loc[idx_ref, "Matricule"]
+                label = f"{row['Nom']} {row['Prénom']}"
+                if str(matricule).strip():
+                    label += f" — {matricule}"
+                options_rattrapage[idx_ref] = label
+
+            idx_choisi_rattrapage = st.selectbox(
+                "🔍 Tapez 3 lettres du nom pour rechercher un étudiant en rattrapage",
+                options=list(options_rattrapage.keys()),
+                format_func=lambda i: options_rattrapage[i],
+                index=None, placeholder="Rechercher un étudiant en rattrapage...",
+                key=f"search_rattrapage_{CLE}",
+            )
+
+            if idx_choisi_rattrapage is not None:
+                moyenne_avant = rattrapage_df.loc[
+                    rattrapage_df["_idx_ref"] == idx_choisi_rattrapage, "Moyenne"
+                ].values[0]
+
+                col_a, col_b = st.columns([1, 1])
+                with col_a:
+                    st.metric("📊 Moyenne avant rattrapage", f"{moyenne_avant} / 20")
+                with col_b:
+                    note_existante = ctx["rattrapage"].get(str(idx_choisi_rattrapage), None)
+                    nouvelle_note = st.number_input(
+                        "✍️ Nouvelle moyenne après rattrapage",
+                        min_value=0.0, max_value=20.0, step=0.25,
+                        value=float(note_existante) if note_existante is not None else 0.0,
+                        key=f"note_rattrapage_input_{CLE}_{idx_choisi_rattrapage}",
+                    )
+
+                if st.button("💾 Enregistrer cette note de rattrapage", type="primary",
+                             key=f"save_rattrapage_{CLE}_{idx_choisi_rattrapage}"):
+                    ctx["rattrapage"][str(idx_choisi_rattrapage)] = nouvelle_note
+                    persist_contexte(CLE, ctx)
+                    st.success("Note de rattrapage enregistrée.")
+                    st.rerun()
+
+            st.divider()
+            st.write("**📋 Suivi des rattrapages** (dans l'ordre du classement initial)")
+
+            lignes_suivi = []
+            for _, row in rattrapage_df.iterrows():
+                idx_ref = row["_idx_ref"]
+                note_rattr = ctx["rattrapage"].get(str(idx_ref), None)
+                lignes_suivi.append({
+                    "Ordre": row["Ordre"],
+                    "Nom": row["Nom"],
+                    "Prénom": row["Prénom"],
+                    "Moyenne avant": row["Moyenne"],
+                    "Moyenne après rattrapage": note_rattr if note_rattr is not None else "—",
+                })
+            suivi_df = pd.DataFrame(lignes_suivi)
+            tableau_selectionnable(suivi_df, height=360, colonnes_figees=3, cle_widget=f"suivi_rattrapage_{CLE}")
+
+            st.download_button(
+                "⬇️ Suivi rattrapage (CSV)", suivi_df.to_csv(index=False).encode("utf-8"),
+                f"rattrapage_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_rattrapage_{CLE}",
+            )
+
+# ============================================================
+# ONGLET 6 : BULLETIN INDIVIDUEL
+# ============================================================
+with tab6:
     st.subheader("Bulletin individuel de l'étudiant")
     afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
 
@@ -960,9 +1058,9 @@ with tab5:
 
 
 # ============================================================
-# ONGLET 6 : ARCHIVES (consultation en lecture seule, par année académique)
+# ONGLET 7 : ARCHIVES (consultation en lecture seule, par année académique)
 # ============================================================
-with tab6:
+with tab7:
     st.subheader("🗄️ Archives par année académique")
     st.caption("Retrouvez ici toutes les années académiques déjà utilisées. "
                "Cliquez sur un dossier pour l'ouvrir, jusqu'à la filière souhaitée. "
