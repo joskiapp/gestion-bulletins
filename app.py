@@ -501,18 +501,9 @@ for annee in CONTEXT_TREE:
 
 st.title("🧮 Calculatrice de Bulletins")
 
-col_annee, _ = st.columns([1, 3])
-with col_annee:
-    debut = st.number_input(
-        "📅 Année de début (ex: 2026)",
-        min_value=2000, max_value=2100, step=1,
-        key="annee_academique_debut",
-        help="Entrez uniquement l'année de début, sans tiret. "
-             "L'année de fin est calculée automatiquement.",
-    )
-save_state("annee_academique_debut", int(debut))
-ANNEE_ACADEMIQUE = f"{int(debut)}-{int(debut) + 1}"
-st.caption(f"➡️ Année académique : **{ANNEE_ACADEMIQUE}**")
+# La valeur est déjà connue via session_state (initialisée plus haut) ; le widget
+# de saisie, lui, n'est affiché que dans l'onglet '1. Liste de référence'.
+ANNEE_ACADEMIQUE = f"{int(st.session_state.annee_academique_debut)}-{int(st.session_state.annee_academique_debut) + 1}"
 
 if not st.session_state.selected_annee or not st.session_state.selected_filiere:
     st.info("👈 Dans le menu à gauche : choisissez une année, puis une filière.")
@@ -523,9 +514,6 @@ FILIERE = st.session_state.selected_filiere
 CLE = cle_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
 ctx = charger_contexte(CLE)
 enregistrer_dans_registre(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
-
-st.caption(f"📂 Espace de travail : **{ANNEE_ACADEMIQUE} · {ANNEE} — {FILIERE}** "
-           f"(les données sont indépendantes pour chaque filière)")
 
 bandeau_annuler(ctx, CLE)
 
@@ -539,6 +527,20 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 # ONGLET 1 : LISTE DE RÉFÉRENCE
 # ============================================================
 with tab1:
+    col_annee, _ = st.columns([1, 3])
+    with col_annee:
+        debut = st.number_input(
+            "📅 Année de début (ex: 2026)",
+            min_value=2000, max_value=2100, step=1,
+            key="annee_academique_debut",
+            help="Entrez uniquement l'année de début, sans tiret. "
+                 "L'année de fin est calculée automatiquement.",
+        )
+    save_state("annee_academique_debut", int(debut))
+    st.caption(f"➡️ Année académique : **{ANNEE_ACADEMIQUE}**")
+    st.caption(f"📂 Espace de travail : **{ANNEE_ACADEMIQUE} · {ANNEE} — {FILIERE}** "
+               f"(les données sont indépendantes pour chaque filière)")
+
     st.subheader(f"Liste de référence — {ANNEE} / {FILIERE}")
 
     nb_notes_existantes = sum(len(v) for v in ctx["grades"].values())
