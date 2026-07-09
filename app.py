@@ -88,6 +88,9 @@ def contexte_par_defaut():
         "collage_notes_df": pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500}),
         "analyse_collage": None,
         "rattrapage": {},
+        "snapshot_recap": None,
+        "snapshot_decisions": None,
+        "snapshot_rattrapage": None,
     }
 
 
@@ -117,6 +120,9 @@ def charger_contexte(cle):
             "collage_notes_df": pd.DataFrame({"Nom et Prénom": [""] * 500, "Note": [""] * 500}),
             "analyse_collage": None,
             "rattrapage": load_state(f"rattrapage::{cle}", {}),
+            "snapshot_recap": load_state(f"snapshot_recap::{cle}", None),
+            "snapshot_decisions": load_state(f"snapshot_decisions::{cle}", None),
+            "snapshot_rattrapage": load_state(f"snapshot_rattrapage::{cle}", None),
         }
     return st.session_state.ctx_store[cle]
 
@@ -232,6 +238,30 @@ def excel_bytes(df, sheet_name="Feuille1", entete_texte=None):
             startrow = 2
         df.to_excel(writer, index=False, sheet_name=sheet_name, startrow=startrow)
     return buffer.getvalue()
+
+
+def enregistrer_definitivement(ctx, cle, nom_section, data_dict, libelle):
+    """Bouton qui fige les données actuelles d'un onglet (récap, décisions, rattrapage...)
+    de façon persistante : même si la liste de référence est ensuite effacée ou modifiée,
+    ces données enregistrées restent consultables. Action irréversible (pas de bouton
+    'annuler' après coup, volontairement)."""
+    snap_key = f"snapshot_{nom_section}"
+    if st.button(f"💾 Enregistrer {libelle} définitivement", key=f"save_def_{nom_section}_{cle}"):
+        serialise = {}
+        for k, v in data_dict.items():
+            serialise[k] = v.to_dict(orient="list") if isinstance(v, pd.DataFrame) else v
+        ctx[snap_key] = serialise
+        save_state(f"{snap_key}::{cle}", serialise)
+        st.success(f"{libelle} enregistré(e) définitivement. Ces données resteront disponibles ici "
+                    f"même si la liste de référence est modifiée ou effacée par la suite.")
+        st.rerun()
+    if ctx.get(snap_key):
+        st.caption("✅ Une version de ces données a déjà été enregistrée définitivement pour cette année/filière.")
+
+
+def afficher_snapshot(snap_dict, cles_df):
+    """Reconstruit les DataFrames sauvegardés à partir d'un snapshot pour affichage."""
+    return {k: pd.DataFrame(v) for k, v in snap_dict.items() if k in cles_df}
 
 
 def split_nom_prenom(nom_complet):
@@ -648,7 +678,8 @@ with tab2:
     else:
         mode = st.radio(
             "Comment voulez-vous saisir les notes ?",
-            ["✍️ Saisie pêle-mêle (une note à la fois)", "📋 Collage de notes déjà préparées (Excel)"],
+            ["✍️ Saisie pêle-mêle (une note à la fois)", "📊 Saisie en grille (navigation aux flèches)",
+             "📋 Collage de notes déjà préparées (Excel)"],
             horizontal=True, key=f"mode_saisie_{CLE}",
         )
         st.divider()
@@ -663,21 +694,6 @@ with tab2:
         if not ctx["matiere_courante"] and ctx["matieres"]:
             ctx["matiere_courante"] = ctx["matieres"][-1]
 
-        choix_matiere = st.selectbox(
-            "📚 Matière (tapez pour rechercher parmi les matières existantes, ou choisissez 'Nouvelle matière')",
-            options=ctx["matieres"] + [NOUVELLE],
-            index=(ctx["matieres"].index(ctx["matiere_courante"])
-                   if ctx["matiere_courante"] in ctx["matieres"] else
-                   (len(ctx["matieres"]) if ctx["matieres"] else 0)),
-            key=f"matiere_select_{CLE}",
-        )
-        if choix_matiere == NOUVELLE:
-            nouvelle_matiere = st.text_input("Nom de la nouvelle matière", key=f"nouvelle_matiere_input_{CLE}")
-            matiere_active = nouvelle_matiere.strip()
-        else:
-            matiere_active = choix_matiere
-            ctx["matiere_courante"] = choix_matiere
-
         def enregistrer_matiere_si_nouvelle(matiere):
             if matiere not in ctx["matieres"]:
                 ctx["matieres"].append(matiere)
@@ -691,7 +707,23 @@ with tab2:
                         [ctx["matieres_df"], pd.DataFrame({"Matière": [matiere]})], ignore_index=True,
                     )
 
-        st.caption(f"Matière active : **{matiere_active or '(aucune)'}** — elle restera sélectionnée pour les saisies suivantes.")
+        if not mode.startswith("📊"):
+            choix_matiere = st.selectbox(
+                "📚 Matière (tapez pour rechercher parmi les matières existantes, ou choisissez 'Nouvelle matière')",
+                options=ctx["matieres"] + [NOUVELLE],
+                index=(ctx["matieres"].index(ctx["matiere_courante"])
+                       if ctx["matiere_courante"] in ctx["matieres"] else
+                       (len(ctx["matieres"]) if ctx["matieres"] else 0)),
+                key=f"matiere_select_{CLE}",
+            )
+            if choix_matiere == NOUVELLE:
+                nouvelle_matiere = st.text_input("Nom de la nouvelle matière", key=f"nouvelle_matiere_input_{CLE}")
+                matiere_active = nouvelle_matiere.strip()
+            else:
+                matiere_active = choix_matiere
+                ctx["matiere_courante"] = choix_matiere
+
+            st.caption(f"Matière active : **{matiere_active or '(aucune)'}** — elle restera sélectionnée pour les saisies suivantes.")
 
         if mode.startswith("✍️"):
             with st.form(f"form_saisie_note_{CLE}", clear_on_submit=True):
@@ -755,6 +787,45 @@ with tab2:
                     if st.button("❌ Non, annuler", key=f"confirm_non_saisie_{CLE}"):
                         st.session_state.pop(f"pending_note_{CLE}", None)
                         st.rerun()
+
+        elif mode.startswith("📊"):
+            if not ctx["matieres"]:
+                st.info("Aucune matière créée pour l'instant. Ajoutez-en une via le mode "
+                         "'✍️ Saisie pêle-mêle' (option 'Nouvelle matière'), puis revenez ici.")
+            else:
+                st.caption(
+                    "💡 Tableau modifiable façon Excel : cliquez dans une cellule et utilisez les flèches "
+                    "du clavier pour naviguer entre étudiants et matières. Chaque case modifiée est "
+                    "enregistrée automatiquement."
+                )
+
+                grille_saisie = pd.DataFrame({"Nom et Prénom": [options[idx] for idx in valid_indices]})
+                for mat in ctx["matieres"]:
+                    grille_saisie[mat] = [
+                        ctx["grades"].get(str(idx), {}).get(mat, None) for idx in valid_indices
+                    ]
+
+                grille_editee = st.data_editor(
+                    grille_saisie, num_rows="fixed", use_container_width=True, height=460,
+                    disabled=["Nom et Prénom"],
+                    column_config={
+                        mat: st.column_config.NumberColumn(mat, min_value=0, max_value=20, step=0.25)
+                        for mat in ctx["matieres"]
+                    },
+                    key=f"grille_saisie_editor_{CLE}",
+                )
+
+                if not grille_editee.equals(grille_saisie):
+                    for pos, idx in enumerate(valid_indices):
+                        idx_str = str(idx)
+                        for mat in ctx["matieres"]:
+                            val = grille_editee.iloc[pos][mat]
+                            if pd.notna(val):
+                                ctx["grades"].setdefault(idx_str, {})[mat] = float(val)
+                            elif mat in ctx["grades"].get(idx_str, {}):
+                                del ctx["grades"][idx_str][mat]
+                    persist_contexte(CLE, ctx)
+                    st.rerun()
 
         else:
             st.info(
@@ -841,7 +912,16 @@ with tab3:
     resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
 
     if valid_ref.empty:
-        st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
+        if ctx.get("snapshot_recap"):
+            st.info("🔒 La liste de référence est vide, mais un récapitulatif avait été enregistré "
+                    "définitivement pour cette année/filière. Le voici :")
+            snap = afficher_snapshot(ctx["snapshot_recap"], ["resultat"])
+            tableau_selectionnable(snap["resultat"], height=460, colonnes_figees=3, cle_widget=f"recap_snap_{CLE}")
+            st.download_button("⬇️ Télécharger en CSV", snap["resultat"].to_csv(index=False).encode("utf-8"),
+                                f"recapitulatif_{ANNEE}_{FILIERE}_enregistre.csv", "text/csv",
+                                key=f"dl_recap_snap_{CLE}")
+        else:
+            st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
     else:
         col1, col2, col3 = st.columns([1, 1, 3])
         with col1:
@@ -870,7 +950,7 @@ with tab3:
 
             entete_texte = f"Année : {ANNEE} | Filière : {FILIERE}"
 
-            colx, coly = st.columns([1, 1])
+            colx, coly, colz = st.columns([1, 1, 1])
             with colx:
                 csv_contenu = entete_texte + "\n" + resultat_df.to_csv(index=False)
                 st.download_button("⬇️ Télécharger en CSV", csv_contenu.encode("utf-8"),
@@ -884,6 +964,8 @@ with tab3:
                     "⬇️ Télécharger en Excel", buffer.getvalue(), f"recapitulatif_{ANNEE}_{FILIERE}.xlsx",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_recap_xlsx_{CLE}",
                 )
+            with colz:
+                enregistrer_definitivement(ctx, CLE, "recap", {"resultat": resultat_df}, "le récapitulatif")
 
 # ============================================================
 # ONGLET 4 : LISTE DES DÉCISIONS
@@ -894,7 +976,18 @@ with tab4:
     resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
 
     if valid_ref.empty:
-        st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
+        if ctx.get("snapshot_decisions"):
+            st.info("🔒 La liste de référence est vide, mais une liste des décisions avait été enregistrée "
+                    "définitivement pour cette année/filière. La voici :")
+            snap = afficher_snapshot(ctx["snapshot_decisions"], ["valides", "non_valides", "grille"])
+            st.markdown("### ✅ Étudiants ayant validé toutes les matières")
+            tableau_selectionnable(snap["valides"], height=320, colonnes_figees=2, cle_widget=f"valides_snap_{CLE}")
+            st.markdown("### ⚠️ Étudiants n'ayant pas validé au moins une matière")
+            tableau_selectionnable(snap["non_valides"], height=320, colonnes_figees=2, cle_widget=f"nonvalides_snap_{CLE}")
+            st.markdown("### 🧭 Grille de validation par matière")
+            tableau_selectionnable(snap["grille"], height=360, colonnes_figees=2, cle_widget=f"grille_snap_{CLE}")
+        else:
+            st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
     elif not matieres:
         st.info("Aucune matière saisie pour l'instant. Ajoutez des notes dans l'onglet '✍️ 2. Saisie des notes'.")
     else:
@@ -965,7 +1058,7 @@ with tab4:
         grille_df.insert(0, "Ordre", range(1, len(grille_df) + 1))
         tableau_selectionnable(grille_df, height=360, colonnes_figees=2, cle_widget=f"grille_{CLE}")
 
-        col5, col6 = st.columns(2)
+        col5, col6, col7 = st.columns(3)
         with col5:
             st.download_button("⬇️ Grille (CSV)", grille_df.to_csv(index=False).encode("utf-8"),
                                 f"grille_validation_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_grille_{CLE}")
@@ -975,6 +1068,12 @@ with tab4:
                                 f"grille_validation_{ANNEE}_{FILIERE}.xlsx",
                                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 key=f"dl_grille_xlsx_{CLE}")
+        with col7:
+            enregistrer_definitivement(
+                ctx, CLE, "decisions",
+                {"valides": valides_df, "non_valides": non_valides_df, "grille": grille_df},
+                "la liste des décisions",
+            )
 
 # ============================================================
 # ONGLET 5 : RATTRAPAGE
@@ -985,7 +1084,13 @@ with tab5:
     resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
 
     if valid_ref.empty:
-        st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
+        if ctx.get("snapshot_rattrapage"):
+            st.info("🔒 La liste de référence est vide, mais un suivi de rattrapage avait été enregistré "
+                    "définitivement pour cette année/filière. Le voici :")
+            snap = afficher_snapshot(ctx["snapshot_rattrapage"], ["suivi"])
+            tableau_selectionnable(snap["suivi"], height=360, colonnes_figees=2, cle_widget=f"suivi_snap_{CLE}")
+        else:
+            st.warning("Aucune liste de référence. Commencez par l'onglet '📋 1. Liste de référence'.")
     elif not matieres:
         st.info("Aucune matière saisie pour l'instant. Ajoutez des notes dans l'onglet '✍️ 2. Saisie des notes'.")
     else:
@@ -1112,7 +1217,7 @@ with tab5:
             tableau_selectionnable(suivi_df, height=360, colonnes_figees=2, cle_widget=f"suivi_rattrapage_{CLE}")
 
             entete_rattr = f"Rattrapage — Année académique : {ANNEE_ACADEMIQUE} | {ANNEE} — {FILIERE}"
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 st.download_button("⬇️ Suivi rattrapage (CSV)", suivi_df.to_csv(index=False).encode("utf-8"),
                                     f"rattrapage_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_rattrapage_{CLE}")
@@ -1122,6 +1227,8 @@ with tab5:
                                     f"rattrapage_{ANNEE}_{FILIERE}.xlsx",
                                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                     key=f"dl_rattrapage_xlsx_{CLE}")
+            with col3:
+                enregistrer_definitivement(ctx, CLE, "rattrapage", {"suivi": suivi_df}, "le suivi de rattrapage")
 
 # ============================================================
 # ONGLET 6 : BULLETIN INDIVIDUEL
