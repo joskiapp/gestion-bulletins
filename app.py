@@ -221,6 +221,19 @@ def bouton_impression(titre, sous_titre, lignes_html, moyenne_html, cle_widget):
     components.html(page, height=60)
 
 
+def excel_bytes(df, sheet_name="Feuille1", entete_texte=None):
+    """Construit un fichier Excel (bytes) à partir d'un DataFrame, avec une ligne
+    d'en-tête optionnelle (ex: contexte année/filière) au-dessus du tableau."""
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        startrow = 0
+        if entete_texte:
+            pd.DataFrame({entete_texte: []}).to_excel(writer, index=False, sheet_name=sheet_name, startrow=0)
+            startrow = 2
+        df.to_excel(writer, index=False, sheet_name=sheet_name, startrow=startrow)
+    return buffer.getvalue()
+
+
 def split_nom_prenom(nom_complet):
     """Sépare 'Nom et Prénom' collé en deux parties : premier mot = Nom, reste = Prénom."""
     parts = str(nom_complet).strip().split(" ", 1)
@@ -420,8 +433,7 @@ def construire_resultat_df(ctx):
     rows = []
     for idx in valid_ref.index:
         notes_etu = ctx["grades"].get(str(idx), {})
-        nom, prenom = split_nom_prenom(valid_ref.loc[idx, "Nom et Prénom"])
-        row = {"Ordre": len(rows) + 1, "Nom": nom, "Prénom": prenom,
+        row = {"Ordre": len(rows) + 1, "Nom et Prénom": valid_ref.loc[idx, "Nom et Prénom"],
                "Matricule": valid_ref.loc[idx, "Matricule"]}
         notes_numeriques = []
         for mat in matieres:
@@ -432,6 +444,16 @@ def construire_resultat_df(ctx):
         row["Moyenne"] = round(sum(notes_numeriques) / len(notes_numeriques), 2) if notes_numeriques else None
         rows.append(row)
     return pd.DataFrame(rows), matieres, valid_ref
+
+
+def notes_effectives_etudiant(ctx, idx):
+    """Notes d'un étudiant après application des corrections de rattrapage,
+    matière par matière (la note de rattrapage remplace la note initiale
+    quand elle existe)."""
+    idx_str = str(idx)
+    notes = dict(ctx["grades"].get(idx_str, {}))
+    notes.update(ctx["rattrapage"].get(idx_str, {}))
+    return notes
 
 
 def afficher_entete_contexte(annee_academique, annee, filiere):
@@ -614,7 +636,6 @@ with tab1:
 # ============================================================
 with tab2:
     st.subheader("Saisie des notes (dans n'importe quel ordre)")
-    afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
 
     ref = ctx["reference_df"]
     valid_mask = ref["Nom et Prénom"].astype(str).str.strip() != ""
@@ -698,13 +719,39 @@ with tab2:
                         st.warning("La note doit être comprise entre 0 et 20.")
                     else:
                         idx_str = str(chosen_idx)
-                        if idx_str not in ctx["grades"]:
-                            ctx["grades"][idx_str] = {}
-                        ctx["grades"][idx_str][matiere_active] = note_val
-                        enregistrer_matiere_si_nouvelle(matiere_active)
+                        deja_saisie = ctx["grades"].get(idx_str, {}).get(matiere_active)
+                        if deja_saisie is not None:
+                            st.session_state[f"pending_note_{CLE}"] = {
+                                "idx": chosen_idx, "matiere": matiere_active,
+                                "note": note_val, "ancienne": deja_saisie,
+                            }
+                        else:
+                            ctx["grades"].setdefault(idx_str, {})[matiere_active] = note_val
+                            enregistrer_matiere_si_nouvelle(matiere_active)
+                            persist_contexte(CLE, ctx)
+                            st.success(f"Note enregistrée pour {options[chosen_idx]} en {matiere_active}. "
+                                       f"Récapitulatif et bulletin mis à jour.")
+                            st.rerun()
+
+            pending = st.session_state.get(f"pending_note_{CLE}")
+            if pending:
+                st.warning(
+                    f"⚠️ La note de **{pending['matiere']}** pour **{options[pending['idx']]}** a déjà été "
+                    f"saisie ({pending['ancienne']}/20). Voulez-vous la remplacer par {pending['note']}/20 ?"
+                )
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("✅ Oui, modifier", key=f"confirm_oui_saisie_{CLE}"):
+                        idx_str = str(pending["idx"])
+                        ctx["grades"].setdefault(idx_str, {})[pending["matiere"]] = pending["note"]
+                        enregistrer_matiere_si_nouvelle(pending["matiere"])
                         persist_contexte(CLE, ctx)
-                        st.success(f"Note enregistrée pour {options[chosen_idx]} en {matiere_active}. "
-                                   f"Récapitulatif et bulletin mis à jour.")
+                        st.session_state.pop(f"pending_note_{CLE}", None)
+                        st.success("Note modifiée. Récapitulatif et bulletin mis à jour.")
+                        st.rerun()
+                with c2:
+                    if st.button("❌ Non, annuler", key=f"confirm_non_saisie_{CLE}"):
+                        st.session_state.pop(f"pending_note_{CLE}", None)
                         st.rerun()
 
         else:
@@ -788,7 +835,6 @@ with tab2:
 # ============================================================
 with tab3:
     st.subheader("Récapitulatif — étudiants en lignes, matières en colonnes")
-    afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
 
     resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
 
@@ -818,7 +864,7 @@ with tab3:
         else:
             st.caption("💡 Cliquez-glissez (ou clic droit → Copier) pour copier une plage de cellules vers Excel. "
                        "Les colonnes Ordre/Nom/Prénom/Matricule restent figées lors du défilement horizontal.")
-            tableau_selectionnable(resultat_df, height=460, colonnes_figees=4, cle_widget=f"recap_{CLE}")
+            tableau_selectionnable(resultat_df, height=460, colonnes_figees=3, cle_widget=f"recap_{CLE}")
 
             entete_texte = f"Année : {ANNEE} | Filière : {FILIERE}"
 
@@ -842,7 +888,6 @@ with tab3:
 # ============================================================
 with tab4:
     st.subheader("Liste des décisions — validation des matières")
-    afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
 
     resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
 
@@ -861,7 +906,7 @@ with tab4:
             return True
 
         resultat_df["Statut"] = resultat_df.apply(a_valide_tout, axis=1)
-        colonnes_affichage = ["Nom", "Prénom"] + matieres
+        colonnes_affichage = ["Nom et Prénom"] + matieres
 
         valides_df = resultat_df[resultat_df["Statut"]][colonnes_affichage].reset_index(drop=True)
         valides_df.insert(0, "Ordre", range(1, len(valides_df) + 1))
@@ -873,30 +918,67 @@ with tab4:
         if valides_df.empty:
             st.caption("Aucun étudiant n'a encore validé toutes les matières.")
         else:
-            tableau_selectionnable(valides_df, height=320, colonnes_figees=3, cle_widget=f"valides_{CLE}")
+            tableau_selectionnable(valides_df, height=320, colonnes_figees=2, cle_widget=f"valides_{CLE}")
 
         st.divider()
         st.markdown(f"### ⚠️ Étudiants n'ayant pas validé au moins une matière ({len(non_valides_df)})")
-        st.caption("Toutes les matières sont affichées (validées et non validées) pour situer chaque étudiant.")
+        st.caption("Toutes les matières sont affichées (validées et non validées) pour situer chaque étudiant. "
+                    "**C'est cette liste qui alimente l'onglet '🔁 5. Rattrapage'.**")
         if non_valides_df.empty:
             st.caption("Aucun étudiant dans cette situation.")
         else:
-            tableau_selectionnable(non_valides_df, height=320, colonnes_figees=3, cle_widget=f"nonvalides_{CLE}")
+            tableau_selectionnable(non_valides_df, height=320, colonnes_figees=2, cle_widget=f"nonvalides_{CLE}")
 
-        col1, col2 = st.columns(2)
+        entete_decisions = f"Liste des décisions — Année académique : {ANNEE_ACADEMIQUE} | {ANNEE} — {FILIERE}"
+
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.download_button("⬇️ Validés (CSV)", valides_df.to_csv(index=False).encode("utf-8"),
                                 f"valides_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_valides_{CLE}")
         with col2:
+            st.download_button("⬇️ Validés (Excel)",
+                                excel_bytes(valides_df, "Validés", entete_decisions),
+                                f"valides_{ANNEE}_{FILIERE}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"dl_valides_xlsx_{CLE}")
+        with col3:
             st.download_button("⬇️ Non validés (CSV)", non_valides_df.to_csv(index=False).encode("utf-8"),
                                 f"non_valides_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_nonvalides_{CLE}")
+        with col4:
+            st.download_button("⬇️ Non validés (Excel)",
+                                excel_bytes(non_valides_df, "Non validés", entete_decisions),
+                                f"non_valides_{ANNEE}_{FILIERE}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"dl_nonvalides_xlsx_{CLE}")
+
+        st.divider()
+        st.markdown("### 🧭 Grille de validation par matière")
+        st.caption("Case vide = matière validée (≥ 12/20). Croix rouge ❌ = matière non validée, à rattraper.")
+
+        grille_df = resultat_df[["Nom et Prénom"] + matieres].reset_index(drop=True).copy()
+        for mat in matieres:
+            grille_df[mat] = resultat_df[mat].apply(
+                lambda v: "❌" if (pd.isna(v) or v < 12) else ""
+            )
+        grille_df.insert(0, "Ordre", range(1, len(grille_df) + 1))
+        tableau_selectionnable(grille_df, height=360, colonnes_figees=2, cle_widget=f"grille_{CLE}")
+
+        col5, col6 = st.columns(2)
+        with col5:
+            st.download_button("⬇️ Grille (CSV)", grille_df.to_csv(index=False).encode("utf-8"),
+                                f"grille_validation_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_grille_{CLE}")
+        with col6:
+            st.download_button("⬇️ Grille (Excel)",
+                                excel_bytes(grille_df, "Grille", entete_decisions),
+                                f"grille_validation_{ANNEE}_{FILIERE}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"dl_grille_xlsx_{CLE}")
 
 # ============================================================
 # ONGLET 5 : RATTRAPAGE
 # ============================================================
 with tab5:
-    st.subheader("Rattrapage — étudiants n'ayant pas atteint la moyenne")
-    afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
+    st.subheader("Rattrapage — étudiants n'ayant pas validé au moins une matière")
 
     resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
 
@@ -906,94 +988,144 @@ with tab5:
         st.info("Aucune matière saisie pour l'instant. Ajoutez des notes dans l'onglet '✍️ 2. Saisie des notes'.")
     else:
         st.caption(
-            "Seuil de passage : **moyenne générale ≥ 12/20**. Les étudiants ayant une moyenne "
-            "strictement inférieure à 12 apparaissent ci-dessous, dans le même ordre que le classement "
-            "général (colonne Ordre)."
+            "La liste ci-dessous reprend les étudiants du tableau **'⚠️ Étudiants n'ayant pas validé au "
+            "moins une matière'** (onglet Liste des décisions) — il ne s'agit pas de la moyenne générale, "
+            "mais bien de la validation matière par matière (< 12/20)."
         )
 
-        # On relie chaque ligne du résultat à son véritable index de référence (celui utilisé
-        # dans ctx["grades"]), car resultat_df est reconstruit avec un index 0..n par défaut.
         resultat_rattr = resultat_df.copy()
         resultat_rattr["_idx_ref"] = valid_ref.index.tolist()
 
-        rattrapage_df = resultat_rattr[
-            resultat_rattr["Moyenne"].notna() & (resultat_rattr["Moyenne"] < 12)
-        ].sort_values("Ordre").reset_index(drop=True)
+        # Construit, pour chaque étudiant, la liste des matières où il est en dessous de 12.
+        matieres_a_rattraper_par_etudiant = {}
+        for _, row in resultat_rattr.iterrows():
+            manquantes = [mat for mat in matieres if pd.isna(row[mat]) or row[mat] < 12]
+            if manquantes:
+                matieres_a_rattraper_par_etudiant[row["_idx_ref"]] = {
+                    "Ordre": row["Ordre"], "Nom et Prénom": row["Nom et Prénom"], "matieres": manquantes,
+                }
 
-        if rattrapage_df.empty:
-            st.success("🎉 Aucun étudiant sous la moyenne : personne n'est concerné par le rattrapage.")
+        if not matieres_a_rattraper_par_etudiant:
+            st.success("🎉 Tous les étudiants ont validé toutes leurs matières : personne n'est concerné par le rattrapage.")
         else:
-            st.caption(f"👥 {len(rattrapage_df)} étudiant(s) concerné(s) par le rattrapage.")
+            st.caption(f"👥 {len(matieres_a_rattraper_par_etudiant)} étudiant(s) concerné(s) par le rattrapage "
+                       f"— la liste reste complète même après saisie d'une note.")
 
             options_rattrapage = {}
-            for _, row in rattrapage_df.iterrows():
-                idx_ref = row["_idx_ref"]
+            for idx_ref, info in matieres_a_rattraper_par_etudiant.items():
                 matricule = valid_ref.loc[idx_ref, "Matricule"]
-                label = f"{row['Nom']} {row['Prénom']}"
+                label = info["Nom et Prénom"]
                 if str(matricule).strip():
                     label += f" — {matricule}"
                 options_rattrapage[idx_ref] = label
 
-            idx_choisi_rattrapage = st.selectbox(
-                "🔍 Tapez 3 lettres du nom pour rechercher un étudiant en rattrapage",
-                options=list(options_rattrapage.keys()),
-                format_func=lambda i: options_rattrapage[i],
-                index=None, placeholder="Rechercher un étudiant en rattrapage...",
-                key=f"search_rattrapage_{CLE}",
-            )
-
-            if idx_choisi_rattrapage is not None:
-                moyenne_avant = rattrapage_df.loc[
-                    rattrapage_df["_idx_ref"] == idx_choisi_rattrapage, "Moyenne"
-                ].values[0]
-
-                col_a, col_b = st.columns([1, 1])
-                with col_a:
-                    st.metric("📊 Moyenne avant rattrapage", f"{moyenne_avant} / 20")
-                with col_b:
-                    note_existante = ctx["rattrapage"].get(str(idx_choisi_rattrapage), None)
-                    nouvelle_note = st.number_input(
-                        "✍️ Nouvelle moyenne après rattrapage",
-                        min_value=0.0, max_value=20.0, step=0.25,
-                        value=float(note_existante) if note_existante is not None else 0.0,
-                        key=f"note_rattrapage_input_{CLE}_{idx_choisi_rattrapage}",
+            col_nom, col_mat = st.columns([2, 1])
+            with col_nom:
+                idx_choisi = st.selectbox(
+                    "🔍 Tapez 2-3 lettres du nom de l'étudiant en rattrapage",
+                    options=list(options_rattrapage.keys()), format_func=lambda i: options_rattrapage[i],
+                    index=None, placeholder="Rechercher un étudiant...", key=f"search_rattrapage_{CLE}",
+                )
+            with col_mat:
+                if idx_choisi is not None:
+                    matieres_dispo = matieres_a_rattraper_par_etudiant[idx_choisi]["matieres"]
+                    matiere_choisie = st.selectbox(
+                        "📚 Matière à rattraper", options=matieres_dispo,
+                        index=None, placeholder="Choisir la matière...",
+                        key=f"search_matiere_rattrapage_{CLE}_{idx_choisi}",
                     )
+                else:
+                    matiere_choisie = None
 
-                if st.button("💾 Enregistrer cette note de rattrapage", type="primary",
-                             key=f"save_rattrapage_{CLE}_{idx_choisi_rattrapage}"):
-                    ctx["rattrapage"][str(idx_choisi_rattrapage)] = nouvelle_note
-                    persist_contexte(CLE, ctx)
-                    st.success("Note de rattrapage enregistrée.")
-                    st.rerun()
+            if idx_choisi is not None and matiere_choisie is not None:
+                idx_str = str(idx_choisi)
+                cle_pair = f"{idx_str}::{matiere_choisie}"
+                note_deja_saisie = ctx["rattrapage"].get(idx_str, {}).get(matiere_choisie)
+                confirm_key = f"rattr_confirme_{CLE}_{cle_pair}"
+
+                if note_deja_saisie is not None and not st.session_state.get(confirm_key, False):
+                    st.warning(
+                        f"⚠️ La note de **{matiere_choisie}** pour **{options_rattrapage[idx_choisi]}** "
+                        f"a déjà été saisie en rattrapage ({note_deja_saisie}/20). Voulez-vous la modifier ?"
+                    )
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("✅ Oui, modifier", key=f"rattr_oui_{CLE}_{cle_pair}"):
+                            st.session_state[confirm_key] = True
+                            st.rerun()
+                    with c2:
+                        if st.button("❌ Non", key=f"rattr_non_{CLE}_{cle_pair}"):
+                            st.stop()
+                else:
+                    note_initiale = ctx["grades"].get(idx_str, {}).get(matiere_choisie)
+                    col_a, col_b = st.columns([1, 1])
+                    with col_a:
+                        st.metric(f"📊 Note initiale en {matiere_choisie}",
+                                   f"{note_initiale}/20" if note_initiale is not None else "—")
+                    with col_b:
+                        nouvelle_note = st.number_input(
+                            "✍️ Nouvelle note de rattrapage", min_value=0.0, max_value=20.0, step=0.25,
+                            value=float(note_deja_saisie) if note_deja_saisie is not None else 0.0,
+                            key=f"rattr_input_{CLE}_{cle_pair}",
+                        )
+                    if st.button("💾 Enregistrer cette note de rattrapage", type="primary",
+                                 key=f"rattr_save_{CLE}_{cle_pair}"):
+                        ctx["rattrapage"].setdefault(idx_str, {})[matiere_choisie] = nouvelle_note
+                        persist_contexte(CLE, ctx)
+                        st.session_state.pop(confirm_key, None)
+                        st.success(
+                            f"Note de rattrapage enregistrée pour {options_rattrapage[idx_choisi]} en "
+                            f"{matiere_choisie}. Moyenne générale et bulletin recalculés."
+                        )
+                        st.rerun()
 
             st.divider()
-            st.write("**📋 Suivi des rattrapages** (dans l'ordre du classement initial)")
+            st.write("**📋 Suivi des rattrapages** (dans le même ordre que le classement initial)")
 
             lignes_suivi = []
-            for _, row in rattrapage_df.iterrows():
-                idx_ref = row["_idx_ref"]
-                note_rattr = ctx["rattrapage"].get(str(idx_ref), None)
+            for idx_ref, info in sorted(matieres_a_rattraper_par_etudiant.items(), key=lambda kv: kv[1]["Ordre"]):
+                idx_str = str(idx_ref)
+                notes_orig = ctx["grades"].get(idx_str, {})
+                moyenne_avant = (round(sum(notes_orig.get(m, 0) for m in matieres if m in notes_orig)
+                                        / max(1, len([m for m in matieres if m in notes_orig])), 2)
+                                  if notes_orig else None)
+                notes_apres = notes_effectives_etudiant(ctx, idx_ref)
+                vals_apres = [notes_apres[m] for m in matieres if m in notes_apres]
+                moyenne_apres = round(sum(vals_apres) / len(vals_apres), 2) if vals_apres else None
+
+                rattrapes = ctx["rattrapage"].get(idx_str, {})
+                matieres_traitees = ", ".join(
+                    f"{m} ({rattrapes[m]}/20)" for m in info["matieres"] if m in rattrapes
+                ) or "—"
+
                 lignes_suivi.append({
-                    "Ordre": row["Ordre"],
-                    "Nom": row["Nom"],
-                    "Prénom": row["Prénom"],
-                    "Moyenne avant": row["Moyenne"],
-                    "Moyenne après rattrapage": note_rattr if note_rattr is not None else "—",
+                    "Ordre": info["Ordre"],
+                    "Nom et Prénom": info["Nom et Prénom"],
+                    "Matière(s) à rattraper": ", ".join(info["matieres"]),
+                    "Note(s) de rattrapage saisie(s)": matieres_traitees,
+                    "Moyenne avant": moyenne_avant,
+                    "Moyenne après rattrapage": moyenne_apres,
                 })
             suivi_df = pd.DataFrame(lignes_suivi)
-            tableau_selectionnable(suivi_df, height=360, colonnes_figees=3, cle_widget=f"suivi_rattrapage_{CLE}")
+            tableau_selectionnable(suivi_df, height=360, colonnes_figees=2, cle_widget=f"suivi_rattrapage_{CLE}")
 
-            st.download_button(
-                "⬇️ Suivi rattrapage (CSV)", suivi_df.to_csv(index=False).encode("utf-8"),
-                f"rattrapage_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_rattrapage_{CLE}",
-            )
+            entete_rattr = f"Rattrapage — Année académique : {ANNEE_ACADEMIQUE} | {ANNEE} — {FILIERE}"
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button("⬇️ Suivi rattrapage (CSV)", suivi_df.to_csv(index=False).encode("utf-8"),
+                                    f"rattrapage_{ANNEE}_{FILIERE}.csv", "text/csv", key=f"dl_rattrapage_{CLE}")
+            with col2:
+                st.download_button("⬇️ Suivi rattrapage (Excel)",
+                                    excel_bytes(suivi_df, "Rattrapage", entete_rattr),
+                                    f"rattrapage_{ANNEE}_{FILIERE}.xlsx",
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key=f"dl_rattrapage_xlsx_{CLE}")
 
 # ============================================================
 # ONGLET 6 : BULLETIN INDIVIDUEL
 # ============================================================
 with tab6:
     st.subheader("Bulletin individuel de l'étudiant")
-    afficher_entete_contexte(ANNEE_ACADEMIQUE, ANNEE, FILIERE)
 
     resultat_df, matieres, valid_ref = construire_resultat_df(ctx)
 
@@ -1013,16 +1145,19 @@ with tab6:
         )
 
         if idx_choisi is not None:
-            nom, prenom = split_nom_prenom(valid_ref.loc[idx_choisi, "Nom et Prénom"])
+            nom_complet = valid_ref.loc[idx_choisi, "Nom et Prénom"]
             matricule = valid_ref.loc[idx_choisi, "Matricule"]
-            notes_etu = ctx["grades"].get(str(idx_choisi), {})
+            notes_etu = notes_effectives_etudiant(ctx, idx_choisi)
+            a_rattrape = bool(ctx["rattrapage"].get(str(idx_choisi)))
 
             st.divider()
-            st.markdown(f"## 🎓 Bulletin — {nom} {prenom}")
+            st.markdown(f"## 🎓 Bulletin — {nom_complet}")
             infos = [f"**Année :** {ANNEE}", f"**Filière :** {FILIERE}"]
             if matricule and str(matricule).strip():
                 infos.insert(0, f"**Matricule :** {matricule}")
             st.markdown(" &nbsp;|&nbsp; ".join(infos))
+            if a_rattrape:
+                st.caption("♻️ Ce bulletin intègre les notes de rattrapage déjà saisies.")
 
             if not matieres:
                 st.info("Aucune matière/note saisie pour l'instant.")
@@ -1038,13 +1173,24 @@ with tab6:
                 else:
                     st.caption("Aucune note enregistrée pour cet étudiant.")
 
-                col1, col2 = st.columns([1, 1])
+                nom_fichier = re.sub(r"\s+", "_", str(nom_complet).strip())
+
+                col1, col2, col3 = st.columns([1, 1, 1])
                 with col1:
                     csv_bulletin = bulletin_df.to_csv(index=False).encode("utf-8")
-                    st.download_button("⬇️ Télécharger ce bulletin (CSV)", csv_bulletin,
-                                        f"bulletin_{nom}_{prenom}.csv", "text/csv",
+                    st.download_button("⬇️ Bulletin (CSV)", csv_bulletin,
+                                        f"bulletin_{nom_fichier}.csv", "text/csv",
                                         key=f"dl_bulletin_{CLE}_{idx_choisi}")
                 with col2:
+                    entete_bulletin = f"Bulletin — {nom_complet} — {ANNEE_ACADEMIQUE} | {ANNEE} — {FILIERE}"
+                    st.download_button(
+                        "⬇️ Bulletin (Excel)",
+                        excel_bytes(bulletin_df, "Bulletin", entete_bulletin),
+                        f"bulletin_{nom_fichier}.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_bulletin_xlsx_{CLE}_{idx_choisi}",
+                    )
+                with col3:
                     lignes_html_impression = "".join(
                         f"<tr><td>{html_lib.escape(str(l['Matière']))}</td><td>{html_lib.escape(str(l['Note /20']))}</td></tr>"
                         for l in lignes_bulletin
@@ -1052,9 +1198,48 @@ with tab6:
                     moyenne_html = f"Moyenne générale : {moyenne} / 20" if moyenne is not None else "Aucune note enregistrée"
                     sous_titre = " | ".join(infos).replace("**", "")
                     bouton_impression(
-                        f"Bulletin — {nom} {prenom}", sous_titre, lignes_html_impression, moyenne_html,
+                        f"Bulletin — {nom_complet}", sous_titre, lignes_html_impression, moyenne_html,
                         cle_widget=f"print_{CLE}_{idx_choisi}",
                     )
+
+        if matieres:
+            st.divider()
+            st.write("**📚 Export groupé**")
+            if st.button("📦 Obtenir tous les bulletins (Excel)", key=f"tous_bulletins_{CLE}"):
+                buffer_tous = BytesIO()
+                noms_feuilles_utilises = set()
+                with pd.ExcelWriter(buffer_tous, engine="openpyxl") as writer:
+                    for idx in valid_ref.index:
+                        nom_complet_i = str(valid_ref.loc[idx, "Nom et Prénom"]).strip() or f"Etudiant_{idx}"
+                        notes_i = notes_effectives_etudiant(ctx, idx)
+                        lignes_i = [{"Matière": mat, "Note /20": notes_i.get(mat, "—")} for mat in matieres]
+                        notes_num_i = [v for v in notes_i.values() if isinstance(v, (int, float))]
+                        moyenne_i = round(sum(notes_num_i) / len(notes_num_i), 2) if notes_num_i else None
+                        df_i = pd.DataFrame(lignes_i)
+
+                        feuille = re.sub(r"[\\/*?:\[\]]", "", nom_complet_i)[:28] or f"Etudiant_{idx}"
+                        base_feuille = feuille
+                        n = 1
+                        while feuille in noms_feuilles_utilises:
+                            n += 1
+                            feuille = f"{base_feuille[:26]}_{n}"
+                        noms_feuilles_utilises.add(feuille)
+
+                        pd.DataFrame({f"{nom_complet_i} — Moyenne : {moyenne_i if moyenne_i is not None else '—'}/20": []}) \
+                            .to_excel(writer, index=False, sheet_name=feuille, startrow=0)
+                        df_i.to_excel(writer, index=False, sheet_name=feuille, startrow=2)
+
+                st.session_state[f"buffer_tous_bulletins_{CLE}"] = buffer_tous.getvalue()
+                st.rerun()
+
+            if st.session_state.get(f"buffer_tous_bulletins_{CLE}"):
+                st.download_button(
+                    "⬇️ Télécharger tous les bulletins (Excel)",
+                    st.session_state[f"buffer_tous_bulletins_{CLE}"],
+                    f"tous_les_bulletins_{ANNEE}_{FILIERE}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_tous_bulletins_{CLE}",
+                )
 
 
 # ============================================================
@@ -1131,7 +1316,7 @@ with tab7:
             else:
                 st.caption(f"👥 {len(valid_ref_a)} étudiant(s) — "
                            f"{len(matieres_a)} matière(s) : {', '.join(matieres_a) if matieres_a else 'aucune'}.")
-                tableau_selectionnable(resultat_a, height=420, colonnes_figees=4, cle_widget=f"archive_{cle_a}")
+                tableau_selectionnable(resultat_a, height=420, colonnes_figees=3, cle_widget=f"archive_{cle_a}")
 
                 csv_dl = resultat_a.to_csv(index=False).encode("utf-8")
                 st.download_button(
