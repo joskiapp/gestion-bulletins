@@ -104,6 +104,22 @@ def enregistrer_dans_registre(annee_academique, annee, filiere):
     save_state("registre_structure", registre)
 
 
+def dupliquer_structure_vers_annee_suivante(ctx_source, annee_academique_cible, annee_niveau, filiere):
+    """Crée (ou remplace) le contexte d'une année académique à partir des étudiants et
+    matières de ctx_source. Les notes, décisions et rattrapages ne sont PAS copiés :
+    ils repartent à zéro puisqu'il s'agit d'une nouvelle évaluation."""
+    cle_cible = cle_contexte(annee_academique_cible, annee_niveau, filiere)
+    nouveau_ctx = contexte_par_defaut()
+    nouveau_ctx["reference_df"] = ctx_source["reference_df"].copy()
+    nouveau_ctx["matieres_df"] = ctx_source["matieres_df"].copy()
+    nouveau_ctx["matieres"] = list(ctx_source["matieres"])
+    nouveau_ctx["matiere_courante"] = ctx_source["matiere_courante"]
+    persist_contexte(cle_cible, nouveau_ctx)
+    enregistrer_dans_registre(annee_academique_cible, annee_niveau, filiere)
+    st.session_state.ctx_store.pop(cle_cible, None)
+    return cle_cible
+
+
 def charger_contexte(cle):
     """Charge (depuis le disque si besoin) les données de la filière sélectionnée, une seule fois."""
     if "ctx_store" not in st.session_state:
@@ -557,7 +573,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 # ONGLET 1 : LISTE DE RÉFÉRENCE
 # ============================================================
 with tab1:
-    col_annee, _ = st.columns([1, 3])
+    col_annee, col_plus = st.columns([3, 2])
     with col_annee:
         debut = st.number_input(
             "📅 Année de début (ex: 2026)",
@@ -570,6 +586,50 @@ with tab1:
     st.caption(f"➡️ Année académique : **{ANNEE_ACADEMIQUE}**")
     st.caption(f"📂 Espace de travail : **{ANNEE_ACADEMIQUE} · {ANNEE} — {FILIERE}** "
                f"(les données sont indépendantes pour chaque filière)")
+
+    with col_plus:
+        annee_suivante_debut = int(debut) + 1
+        annee_academique_suivante = f"{annee_suivante_debut}-{annee_suivante_debut + 1}"
+        registre_actuel = load_state("registre_structure", {})
+        existe_deja = (
+            annee_academique_suivante in registre_actuel
+            and ANNEE in registre_actuel[annee_academique_suivante]
+            and FILIERE in registre_actuel[annee_academique_suivante][ANNEE]
+        )
+        confirm_key = f"confirm_nouvelle_annee_{CLE}"
+        st.write("")
+        if not st.session_state.get(confirm_key, False):
+            if st.button(
+                f"➕ Créer {annee_academique_suivante}", key=f"creer_annee_{CLE}", use_container_width=True,
+                help=f"Crée l'année académique {annee_academique_suivante} pour {ANNEE} — {FILIERE}, avec la "
+                     f"même liste d'étudiants et de matières que {ANNEE_ACADEMIQUE} (les notes repartent à zéro).",
+            ):
+                if existe_deja:
+                    st.session_state[confirm_key] = True
+                    st.rerun()
+                else:
+                    dupliquer_structure_vers_annee_suivante(ctx, annee_academique_suivante, ANNEE, FILIERE)
+                    st.session_state.annee_academique_debut = annee_suivante_debut
+                    save_state("annee_academique_debut", annee_suivante_debut)
+                    st.success(f"Année académique {annee_academique_suivante} créée pour {ANNEE} — {FILIERE}, "
+                               f"avec les mêmes étudiants et matières que {ANNEE_ACADEMIQUE}.")
+                    st.rerun()
+        else:
+            st.warning(f"⚠️ {annee_academique_suivante} contient déjà des données pour {ANNEE} — {FILIERE}. "
+                       f"Remplacer par une copie de {ANNEE_ACADEMIQUE} (étudiants + matières) ?")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("✅ Oui, remplacer", key=f"confirm_oui_annee_{CLE}", type="primary"):
+                    dupliquer_structure_vers_annee_suivante(ctx, annee_academique_suivante, ANNEE, FILIERE)
+                    st.session_state.annee_academique_debut = annee_suivante_debut
+                    save_state("annee_academique_debut", annee_suivante_debut)
+                    st.session_state.pop(confirm_key, None)
+                    st.success(f"Année académique {annee_academique_suivante} mise à jour.")
+                    st.rerun()
+            with c2:
+                if st.button("❌ Annuler", key=f"confirm_non_annee_{CLE}"):
+                    st.session_state.pop(confirm_key, None)
+                    st.rerun()
 
     st.subheader(f"Liste de référence — {ANNEE} / {FILIERE}")
 
